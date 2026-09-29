@@ -1,9 +1,9 @@
 # Implementation backlog
 
 The repository contains the design and the completed native dependency build,
-H3 filtering, worker output-limit, and GeoParquet writer compatibility gates.
-Remaining items below are pending; [DESIGN.md](DESIGN.md) defines the intended
-behavior.
+H3 filtering, worker output-limit, GeoParquet writer compatibility, and typed
+command configuration gates. Remaining items below are pending;
+[DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
 
@@ -27,7 +27,7 @@ behavior.
 
 ## 2. Establish project and container build
 
-- [ ] Add the Go module, supervisor/worker command modes, typed kong config with
+- [x] Add the Go module, supervisor/worker command modes, typed kong config with
   documented defaults and environment overrides, validation, and slog `-v`.
 - [ ] Add Makefile lint/test/build/image/smoke targets and a pinned prek
   configuration; enable hooks. Use gotest.tools/v3 and table-driven tests.

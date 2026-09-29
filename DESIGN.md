@@ -3,8 +3,9 @@
 ## Status and scope
 
 This document specifies the implementation. The native dependency, image build,
-H3 filtering, worker output-limit, and GeoParquet writer compatibility gates are
-implemented; the HTTP service and CLI remain under construction.
+H3 filtering, worker output-limit, GeoParquet writer compatibility, and typed
+command configuration gates are implemented; the HTTP service and CLI remain
+under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -375,8 +376,13 @@ ko 0.19.1, DuckDB 1.5.5 through duckdb-go v2.10505.0, and H3 Go v4.5.0.
 The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
-Proposed defaults are starting points to validate with representative POIs.
-All flags have `OVERTURE_`-prefixed environment equivalents.
+`cmd/overturetunkki` now provides the supervisor and worker process modes. The
+supervisor mode is the default; both modes use the same typed configuration and
+remain signal-cancellable while their catalog, HTTP, and DuckDB job loops are
+added. All flags have `OVERTURE_`-prefixed environment equivalents, and `-v`
+sets the default `slog` level to debug.
+
+These defaults are starting points to validate with representative POIs.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -402,13 +408,15 @@ All flags have `OVERTURE_`-prefixed environment equivalents.
 | `-v`, `--verbose` | `false` | Set default slog level to debug. |
 
 Reject nonpositive limits, unsupported fields, an unwritable cache, and
-`cache_max_bytes < max_tile_bytes`. Validate concurrency against deployment
-memory and scratch allocations; DuckDB memory limits do not bound total process
-RSS. Use container memory/CPU limits in addition. Log failures with structured
-request ID, catalog version, H3 cell, duration, and error metadata, without
-credentials. Metrics cover catalog changes/check failures, cache hits/misses,
-negative hits, eviction, bytes/reservations, workers/queue, latency, cancellation,
-and size rejection. Avoid H3 cells or release IDs as unbounded metric labels.
+`cache_max_bytes < max_tile_bytes`. Require `id` and `geometry`, reject duplicate
+or unknown fields, and reject malformed listen or catalog URLs. Validate
+concurrency against deployment memory and scratch allocations; DuckDB memory
+limits do not bound total process RSS. Use container memory/CPU limits in
+addition. Log failures with structured request ID, catalog version, H3 cell,
+duration, and error metadata, without credentials. Metrics cover catalog
+changes/check failures, cache hits/misses, negative hits, eviction,
+bytes/reservations, workers/queue, latency, cancellation, and size rejection.
+Avoid H3 cells or release IDs as unbounded metric labels.
 
 Pin Go 1.27, ko, the DuckDB Go driver/core, H3, extensions, and runtime image.
 The [DuckDB Go client](https://duckdb.org/docs/current/clients/go/overview) uses

@@ -5,6 +5,7 @@ go 1.27.0
 toolchain go1.27.1
 
 require (
+	github.com/alecthomas/kong v1.16.1
 	github.com/apache/arrow-go/v18 v18.5.1
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/uber/h3-go/v4 v4.5.0
