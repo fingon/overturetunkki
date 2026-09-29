@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	// Register DuckDB's database/sql driver.
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -234,8 +235,18 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 }
 
 func (provider *tileProvider) rememberSizeRejection(key cache.Key, err error) error {
-	if outputTooLarge, ok := errors.AsType[*worker.OutputTooLargeError](err); ok {
-		rejection, rejectionErr := cache.NewSizeRejection(key, cache.RejectionLimitBytes, outputTooLarge.ActualBytes, outputTooLarge.LimitBytes)
+	if errors.Is(err, worker.ErrOutputTooLarge) {
+		fallback, proofErr := worker.NewOutputTooLargeError(provider.maxBytes)
+		if proofErr != nil {
+			return fmt.Errorf("create output size rejection proof: %w", proofErr)
+		}
+		actualBytes := fallback.ActualBytes
+		limitBytes := fallback.LimitBytes
+		if outputTooLarge, ok := errors.AsType[*worker.OutputTooLargeError](err); ok && outputTooLarge.ActualBytes > outputTooLarge.LimitBytes {
+			actualBytes = outputTooLarge.ActualBytes
+			limitBytes = outputTooLarge.LimitBytes
+		}
+		rejection, rejectionErr := cache.NewSizeRejection(key, cache.RejectionLimitBytes, actualBytes, limitBytes)
 		if rejectionErr != nil {
 			return rejectionErr
 		}
@@ -367,6 +378,13 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 		if ctx.Err() != nil {
 			return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker: %w", worker.ErrTileCanceled, ctx.Err())
 		}
+		if workerExitedOnFileSizeLimit(err) {
+			outputTooLarge, proofErr := worker.NewOutputTooLargeError(request.Settings.MaxOutputBytes)
+			if proofErr == nil {
+				return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker exited: %w", outputTooLarge, err)
+			}
+			return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker exited: %w", worker.ErrOutputTooLarge, err)
+		}
 		if diagnostics.Len() != 0 {
 			return worker.TileResult{}, fmt.Errorf("isolated tile worker exited: %w: %s", err, strings.TrimSpace(diagnostics.String()))
 		}
@@ -386,6 +404,15 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 		return worker.TileResult{}, errors.New("decode isolated tile worker response: result and error are both absent")
 	}
 	return *response.Result, nil
+}
+
+func workerExitedOnFileSizeLimit(err error) bool {
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ProcessState == nil {
+		return false
+	}
+	waitStatus, ok := exitError.Sys().(syscall.WaitStatus)
+	return ok && waitStatus.Signaled() && waitStatus.Signal() == syscall.SIGXFSZ
 }
 
 type boundedProtocolBuffer struct {
@@ -409,7 +436,7 @@ func (buffer *boundedProtocolBuffer) Err() error {
 	return buffer.err
 }
 
-func encodeTileWorkerError(err error) tileWorkerError {
+func encodeTileWorkerErrorWithLimit(err error, maxOutputBytes int64) tileWorkerError {
 	result := tileWorkerError{Kind: workerErrorGeneric, Message: err.Error()}
 	var outputTooLarge *worker.OutputTooLargeError
 	var tooManyRows *worker.TooManyRowsError
@@ -424,6 +451,10 @@ func encodeTileWorkerError(err error) tileWorkerError {
 		result.LimitRows = tooManyRows.LimitRows
 	case errors.Is(err, worker.ErrOutputTooLarge):
 		result.Kind = workerErrorOutputTooLarge
+		if outputTooLarge, proofErr := worker.NewOutputTooLargeError(maxOutputBytes); proofErr == nil {
+			result.ActualBytes = outputTooLarge.ActualBytes
+			result.LimitBytes = outputTooLarge.LimitBytes
+		}
 	case errors.Is(err, worker.ErrDiskFailure):
 		result.Kind = workerErrorDisk
 	case errors.Is(err, worker.ErrOutOfMemory):
@@ -487,7 +518,7 @@ func runWorkerProtocol(ctx context.Context) error {
 	response := tileWorkerResponse{Result: &result}
 	if err != nil {
 		response.Result = nil
-		encoded := encodeTileWorkerError(err)
+		encoded := encodeTileWorkerErrorWithLimit(err, request.Settings.MaxOutputBytes)
 		response.Error = &encoded
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {

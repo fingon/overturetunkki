@@ -118,6 +118,17 @@ func TestCandidateRowLimit(t *testing.T) {
 	assert.Equal(t, rowCount, int(boundedLimit))
 }
 
+func TestClassifyCopyErrorRetainsOutputSizeProof(t *testing.T) {
+	err := classifyCopyError(syscall.EFBIG, 1024)
+	assert.Assert(t, errors.Is(err, ErrOutputTooLarge))
+	var outputTooLarge *OutputTooLargeError
+	assert.Assert(t, errors.As(err, &outputTooLarge))
+	if outputTooLarge != nil {
+		assert.Equal(t, outputTooLarge.ActualBytes, int64(1025))
+		assert.Equal(t, outputTooLarge.LimitBytes, int64(1024))
+	}
+}
+
 func TestCopyLimitSubprocess(t *testing.T) {
 	if os.Getenv(copyHelperEnv) != "1" {
 		return

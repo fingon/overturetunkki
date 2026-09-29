@@ -17,6 +17,18 @@ type OutputTooLargeError struct {
 	LimitBytes  int64
 }
 
+// NewOutputTooLargeError creates a proof that output crossed the byte limit.
+func NewOutputTooLargeError(limitBytes int64) (*OutputTooLargeError, error) {
+	const maxInt64 = int64(1<<63 - 1)
+	if limitBytes <= 0 {
+		return nil, fmt.Errorf("output byte limit must be positive, got %d", limitBytes)
+	}
+	if limitBytes == maxInt64 {
+		return nil, errors.New("output byte limit cannot represent an over-limit byte count")
+	}
+	return &OutputTooLargeError{ActualBytes: limitBytes + 1, LimitBytes: limitBytes}, nil
+}
+
 func (err *OutputTooLargeError) Error() string {
 	return fmt.Sprintf("COPY output is %d bytes, limit is %d bytes", err.ActualBytes, err.LimitBytes)
 }
@@ -137,7 +149,11 @@ func classifyCopyError(err error, maxBytes int64) error {
 	lowerMessage := strings.ToLower(err.Error())
 	if errors.Is(err, syscall.EFBIG) || strings.Contains(lowerMessage, "file size") ||
 		strings.Contains(lowerMessage, "file too large") {
-		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", ErrOutputTooLarge, maxBytes, err)
+		outputTooLarge, proofErr := NewOutputTooLargeError(maxBytes)
+		if proofErr != nil {
+			return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", ErrOutputTooLarge, maxBytes, err)
+		}
+		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", outputTooLarge, maxBytes, err)
 	}
 	return classifyWorkerError(fmt.Errorf("DuckDB COPY failed: %w", err))
 }
