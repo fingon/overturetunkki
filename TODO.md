@@ -1,7 +1,7 @@
 # Implementation backlog
 
-The repository contains the design and the completed native dependency build
-and H3 filtering gates. Remaining items below are pending;
+The repository contains the design and the completed native dependency build,
+H3 filtering, and worker output-limit gates. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -15,7 +15,7 @@ and H3 filtering gates. Remaining items below are pending;
 - [x] Prove the DuckDB H3 scalar UDF integration and performance. Implement and
   compare conservative bbox pruning against unpruned exact membership at cell
   boundaries, pentagons, poles, and the antimeridian.
-- [ ] Prove isolated-worker RLIMIT_FSIZE behavior for DuckDB COPY, including
+- [x] Prove isolated-worker RLIMIT_FSIZE behavior for DuckDB COPY, including
   buffered output, footer growth, huge individual rows, exact-limit success,
   SIGXFSZ handling, and cleanup. Verify bounded candidate materialization and
   disabling COPY-phase spill. No serving implementation ships without a hard

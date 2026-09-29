@@ -3,8 +3,8 @@
 ## Status and scope
 
 This document specifies the implementation. The native dependency, image build,
-and H3 filtering gates are implemented; the HTTP service and CLI remain under
-construction.
+H3 filtering, and worker output-limit gates are implemented; the HTTP service
+and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -283,12 +283,23 @@ semantics. Verify with an independent reader, including zero rows and nested
 fields; plain Parquet containing WKB without metadata is insufficient.
 
 Set Linux `RLIMIT_FSIZE` in the isolated worker to `max_tile_bytes` before COPY.
-Catch/identify limit failures and worker termination due to `SIGXFSZ`; reject as
-`tile_too_large` and remove partial output. This bounds regular-file output even
-when DuckDB buffers row groups. Keep DuckDB temporary files disabled in the COPY
-phase after bounded materialization so this limit cannot be confused with a
-spill-file limit. Prove that transition with the pinned DuckDB build; it is an
-implementation gate. Other write failures are storage errors, not size errors.
+The `internal/worker` output guard applies that limit, catches `EFBIG`-style
+COPY errors, reports `ErrOutputTooLarge`, and removes partial output. The
+supervisor must also remove the staging path when the worker terminates from
+`SIGXFSZ`; the limit bounds regular-file output even when DuckDB buffers row
+groups or grows the footer. `DisableCopySpill` sets both `temp_directory = ''`
+and `max_temp_directory_size = '0B'` for the COPY phase, so the file-size limit
+cannot be confused with a spill-file limit. Other write failures remain storage
+errors, not size errors.
+
+`internal/worker/output_test.go` proves this contract in subprocesses using the
+pinned DuckDB build: a buffered 250,000-row Parquet COPY succeeds at its exact
+measured size and fails one byte below it; a 2 MiB high-entropy individual row
+fails under a 64 KiB limit; partial files are never accepted; and an ordered,
+low-memory COPY fails when spilling is disabled. The parent accepts either a
+returned file-size error or a worker exit signaled by `SIGXFSZ`, and always
+cleans the staging path. The same package verifies that candidate materializing
+queries use `LIMIT max_tile_rows + 1`, including zero and overflow limits.
 
 After COPY, validate the footer, GeoParquet metadata, actual file size, and
 expected schema before publication. Include footer bytes in the limit and allow
