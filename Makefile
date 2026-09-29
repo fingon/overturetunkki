@@ -8,6 +8,7 @@ TARGET_ARCH ?= $(shell $(GO) env GOARCH)
 CGO_ENABLED ?= 1
 BIN_DIR ?= bin
 SERVICE_BIN := $(BIN_DIR)/overturetunkki
+CLIENT_BIN := $(BIN_DIR)/overture-client
 NATIVE_PROBE_BIN := $(BIN_DIR)/native-probe
 IMAGE_REPO ?= overturetunkki/native-probe
 IMAGE_TAG ?= dev
@@ -29,6 +30,7 @@ test:
 build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(SERVICE_BIN) ./cmd/overturetunkki
+	CGO_ENABLED=0 $(GO) build -trimpath -o $(CLIENT_BIN) ./cmd/overture-client
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(NATIVE_PROBE_BIN) ./cmd/native-probe
 
 build-linux:

@@ -93,7 +93,7 @@ items below are pending;
 
 ## 7. Go CLI testing client
 
-- [ ] Add cmd/overture-client and a reusable HTTP client package with kong flags,
+- [x] Add cmd/overture-client and a reusable HTTP client package with kong flags,
   OVERTURE_CLIENT_ environment overrides, configuration validation, command-wide
   cancellation/deadlines, and slog verbose diagnostics. Keep it independent of
   DuckDB and server implementation packages.

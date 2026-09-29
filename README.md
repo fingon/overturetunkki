@@ -14,7 +14,8 @@ supervisor/worker configuration, deadline-bound STAC catalog validation and
 observation with rollover/fail-closed coverage, cache ownership/admission/
 persistence with quota/restart coverage, bounded scratch/negative-cache
 primitives, the HTTP service, and the opt-in container lifecycle harness are
-implemented. The Go CLI testing client remains to be added.
+implemented. The Go CLI testing client's command behavior remains under
+construction.
 
 The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses
