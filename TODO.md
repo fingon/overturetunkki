@@ -70,7 +70,7 @@ Remaining items below are pending;
 - [x] Implement LRU eviction, open-reader pins, obsolete-generation priority,
   atomic file/sidecar publication, batched recency persistence, and startup
   reconciliation. Keep deleted/open files and failed cleanup accounted.
-- [ ] Implement bounded scratch with deployment quotas and separate bounded
+- [x] Implement bounded scratch with deployment quotas and separate bounded
   TTL negative-cache entries for proven size rejections only.
 - [ ] Test quota boundaries, all-pinned capacity failures, parallel admissions,
   cancellation of the last waiter, generation changes, disk-full errors,

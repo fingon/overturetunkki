@@ -373,7 +373,11 @@ for one key, detaches canceled callers, cancels abandoned jobs, and releases
 reservations after build cleanup. It publishes a file and sidecar atomically,
 maintains a doubly linked LRU with reader pins and obsolete-generation priority,
 batches recency writes, and reconciles corrupt/orphan state at startup. Quota
-reservation and negative-cache policy remain separate.
+reservation and negative-cache policy remain separate. `ScratchPool` enforces
+deployment-wide scratch reservations with caller cancellation. `NegativeCache`
+accepts only constructed row/byte size proofs, bounds them with an LRU and TTL,
+and supports catalog-version invalidation; transient failures have no insertion
+path.
 
 Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.
 The size policy hashes byte/row limits, preventing reuse of outdated rejection
