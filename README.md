@@ -1,0 +1,12 @@
+# Overture caching container
+
+Planned Go 1.27 service, built with ko, serving zstd-compressed GeoParquet POI
+tiles by H3 cell from Overture's S3 catalog through DuckDB. The design includes
+catalog version checks, configurable output fields and tile limits, finer-cell
+retry guidance, and a bounded disk LRU cache. A planned Go CLI testing client
+will inspect catalog versions, download tiles, and exercise API error handling.
+
+**Status:** design only; the server is not implemented yet.
+
+See [DESIGN.md](DESIGN.md) for the architecture and API, and [TODO.md](TODO.md)
+for the implementation backlog.
