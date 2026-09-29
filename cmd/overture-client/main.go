@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -29,9 +28,12 @@ type cliConfig struct {
 type catalogCommand struct{}
 
 type tileCommand struct {
-	Cell           string `arg:"" help:"Canonical H3 cell index."`
-	CatalogVersion string `name:"catalog-version" help:"Explicit catalog version."`
-	IfNoneMatch    string `name:"if-none-match" help:"ETag for conditional tile testing."`
+	Cell             string `arg:"" help:"Canonical H3 cell index."`
+	CatalogVersion   string `name:"catalog-version" help:"Explicit catalog version."`
+	IfNoneMatch      string `name:"if-none-match" help:"ETag for conditional tile testing."`
+	Output           string `name:"output" help:"Destination Parquet file."`
+	Force            bool   `name:"force" help:"Allow replacing an existing destination."`
+	MaxDownloadBytes int64  `name:"max-download-bytes" env:"OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES" default:"67108864" help:"Maximum downloaded response bytes."`
 }
 
 func main() {
@@ -117,34 +119,60 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 	if err != nil {
 		return err
 	}
+	if command.Output == "" {
+		return fmt.Errorf("tile command output is required")
+	}
+	if command.MaxDownloadBytes <= 0 {
+		return fmt.Errorf("tile command max download bytes must be positive")
+	}
 	catalogVersion := command.CatalogVersion
+	expectedProjectionID := ""
+	maxDownloadBytes := command.MaxDownloadBytes
 	if catalogVersion == "" {
 		catalogResponse, _, err := httpClient.FetchCatalog(ctx)
 		if err != nil {
 			return fmt.Errorf("discover catalog for tile: %w", err)
 		}
 		catalogVersion = catalogResponse.CatalogVersion
+		expectedProjectionID = catalogResponse.ProjectionID
+		if catalogResponse.MaxTileBytes < maxDownloadBytes {
+			maxDownloadBytes = catalogResponse.MaxTileBytes
+		}
 	}
 	response, err := httpClient.RequestTile(ctx, cell.String(), catalogVersion, command.IfNoneMatch)
 	if err != nil {
 		return err
 	}
-	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotModified {
-		return client.ParseHTTPError(response, client.DefaultErrorBodyBytes)
-	}
-	if err := client.CloseResponse(response); err != nil {
-		return fmt.Errorf("close tile response: %w", err)
+	downloadResult, err := client.DownloadTileResponse(ctx, response, client.DownloadOptions{
+		Destination:            command.Output,
+		Force:                  command.Force,
+		MaxDownloadBytes:       maxDownloadBytes,
+		ExpectedCatalogVersion: catalogVersion,
+		ExpectedProjectionID:   expectedProjectionID,
+	})
+	if err != nil {
+		return fmt.Errorf("download tile: %w", err)
 	}
 	result := struct {
-		Cell           string `json:"cell"`
-		CatalogVersion string `json:"catalog_version"`
-		Status         int    `json:"status"`
-		ETag           string `json:"etag,omitempty"`
+		Cell            string `json:"cell"`
+		Release         string `json:"release,omitempty"`
+		CatalogVersion  string `json:"catalog_version"`
+		ProjectionID    string `json:"projection_id,omitempty"`
+		Status          int    `json:"status"`
+		ETag            string `json:"etag,omitempty"`
+		DownloadedBytes int64  `json:"downloaded_bytes,omitempty"`
+		PublishedPath   string `json:"published_path,omitempty"`
+		NotModified     bool   `json:"not_modified,omitempty"`
 	}{
-		Cell:           cell.String(),
-		CatalogVersion: catalogVersion,
-		Status:         response.StatusCode,
-		ETag:           response.Header.Get("ETag"),
+		Cell:            cell.String(),
+		Release:         downloadResult.Release,
+		CatalogVersion:  catalogVersion,
+		ProjectionID:    downloadResult.ProjectionID,
+		Status:          downloadResult.StatusCode,
+		ETag:            downloadResult.ETag,
+		DownloadedBytes: downloadResult.DownloadedBytes,
+		PublishedPath:   downloadResult.PublishedPath,
+		NotModified:     downloadResult.NotModified,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		return fmt.Errorf("write tile result: %w", err)

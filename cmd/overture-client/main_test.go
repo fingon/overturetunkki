@@ -3,18 +3,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/mstenber/overturetunkki/internal/client"
 	"gotest.tools/v3/assert"
 )
 
 func TestRunDiscoversCatalogForTile(t *testing.T) {
 	cell := "8928308280fffff"
+	outputPath := filepath.Join(t.TempDir(), "tile.parquet")
+	tileBody := []byte("PAR1tilePAR1")
+	tileDigest := sha256.Sum256(tileBody)
 	var catalogCalls, tileCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -26,24 +34,27 @@ func TestRunDiscoversCatalogForTile(t *testing.T) {
 		case "/v1/tiles/places/" + cell:
 			tileCalls++
 			assert.Equal(t, request.URL.Query().Get("catalog_version"), "release+sha256:test")
-			responseWriter.Header().Set("ETag", `"sha256:test"`)
-			responseWriter.WriteHeader(http.StatusOK)
+			writeTileResponse(t, responseWriter, tileBody, "release", "release+sha256:test", "sha256:projection", `"sha256:`+hex.EncodeToString(tileDigest[:])+`"`)
 		default:
 			http.NotFound(responseWriter, request)
 		}
 	}))
 	defer server.Close()
 	output := captureOutput(t, func() error {
-		return run(context.Background(), []string{"--server-url=" + server.URL, "tile", cell})
+		return run(context.Background(), []string{"--server-url=" + server.URL, "tile", cell, "--output=" + outputPath})
 	})
 	assert.NilError(t, output.err)
 	assert.Equal(t, catalogCalls, 1)
 	assert.Equal(t, tileCalls, 1)
 	assert.Assert(t, bytes.Contains(output.body, []byte(`"status":200`)))
+	actual, err := os.ReadFile(outputPath)
+	assert.NilError(t, err)
+	assert.DeepEqual(t, actual, tileBody)
 }
 
 func TestRunTileExplicitVersionDoesNotDiscover(t *testing.T) {
 	cell := "8928308280fffff"
+	outputPath := filepath.Join(t.TempDir(), "tile.parquet")
 	var catalogCalls, tileCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -66,12 +77,26 @@ func TestRunTileExplicitVersionDoesNotDiscover(t *testing.T) {
 			"tile", cell,
 			"--catalog-version=explicit+sha256:test",
 			"--if-none-match=\"sha256:old\"",
+			"--output=" + outputPath,
 		})
 	})
 	assert.NilError(t, output.err)
 	assert.Equal(t, catalogCalls, 0)
 	assert.Equal(t, tileCalls, 1)
 	assert.Assert(t, bytes.Contains(output.body, []byte(`"status":304`)))
+}
+
+func writeTileResponse(t *testing.T, responseWriter http.ResponseWriter, body []byte, release, catalogVersion, projectionID, etag string) {
+	t.Helper()
+	responseWriter.Header().Set("Content-Type", client.ContentTypeParquet)
+	responseWriter.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	responseWriter.Header().Set(client.ReleaseHeader, release)
+	responseWriter.Header().Set(client.CatalogVersionHeader, catalogVersion)
+	responseWriter.Header().Set(client.ProjectionHeader, projectionID)
+	responseWriter.Header().Set("ETag", etag)
+	responseWriter.WriteHeader(http.StatusOK)
+	_, err := responseWriter.Write(body)
+	assert.NilError(t, err)
 }
 
 func TestRunValidatesClientConfiguration(t *testing.T) {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/uber/h3-go/v4"
 )
@@ -96,7 +95,7 @@ func (client *Client) FetchCatalog(ctx context.Context) (CatalogResponse, Respon
 		return CatalogResponse{}, ResponseMeta{}, err
 	}
 	meta := responseMeta(response)
-	body, err := ReadBody(response, client.responseBytes)
+	body, err := ReadBody(response, client.responseLimit())
 	if err != nil {
 		return CatalogResponse{}, meta, fmt.Errorf("read catalog response: %w", err)
 	}
@@ -195,8 +194,4 @@ func (client *Client) responseLimit() int64 {
 		return DefaultResponseBytes
 	}
 	return client.responseBytes
-}
-
-func trimHTTPErrorBody(body []byte) string {
-	return strings.TrimSpace(string(body))
 }

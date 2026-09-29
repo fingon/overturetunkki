@@ -32,6 +32,7 @@ const (
 	retryAfterSeconds          = "1"
 	defaultTileConcurrency     = 2
 	defaultWriteTimeout        = 30 * time.Second
+	tileDigestPrefix           = "sha256:"
 	capacityUnavailableCode    = "capacity_unavailable"
 	capacityUnavailableMessage = "tile capacity is unavailable"
 	serverShuttingDownCode     = "server_shutting_down"
@@ -410,7 +411,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 }
 
 func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request *http.Request, snapshot catalog.Snapshot, tile Tile) {
-	if tile.Path == "" || tile.SizeBytes <= 0 || tile.Digest == "" || strings.ContainsAny(tile.Digest, "\"\r\n") {
+	if tile.Path == "" || tile.SizeBytes <= 0 || !validTileDigest(tile.Digest) {
 		closeTileReader(request, tile)
 		slog.Error("tile metadata is invalid", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "size_bytes", tile.SizeBytes)
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata is invalid"})
@@ -474,6 +475,19 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 	if _, err := io.CopyN(responseWriter, file, tile.SizeBytes); err != nil {
 		slog.Error("stream tile response", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
 	}
+}
+
+func validTileDigest(value string) bool {
+	if len(value) != len(tileDigestPrefix)+64 || !strings.HasPrefix(value, tileDigestPrefix) {
+		return false
+	}
+	for _, character := range value[len(tileDigestPrefix):] {
+		if (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func closeTileReader(request *http.Request, tile Tile) {

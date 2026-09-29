@@ -100,7 +100,7 @@ items below are pending;
 - [x] Implement catalog and tile commands, automatic catalog discovery, explicit
   version requests, and If-None-Match testing. Preserve raw failure behavior:
   no automatic retries, catalog replacement, or H3 refinement.
-- [ ] Implement bounded streaming downloads, required-header/version/projection
+- [x] Implement bounded streaming downloads, required-header/version/projection
   checks, Content-Length and SHA-256 ETag validation, Parquet magic checks,
   temporary-file cleanup, atomic publication, and explicit overwrite control.
   Standardize the server's digest ETag format to match the client contract.

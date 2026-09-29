@@ -233,6 +233,36 @@ func TestServerTileVersionValidationAndConditionalResponse(t *testing.T) {
 	assert.Assert(t, provider.callCount() >= 3)
 }
 
+func TestServerRejectsNonCanonicalTileDigest(t *testing.T) {
+	data := []byte("complete parquet bytes")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	cases := []string{
+		"sha256:" + strings.Repeat("A", 64),
+		"sha256:" + strings.Repeat("0", 63),
+		"sha512:" + strings.Repeat("0", 64),
+	}
+	for _, digest := range cases {
+		t.Run(digest, func(t *testing.T) {
+			observer := &testObserver{snapshot: testSnapshot()}
+			provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: digest}}
+			server, err := New(testOptions(observer, provider))
+			assert.NilError(t, err)
+			if err != nil {
+				return
+			}
+			cell := testCell(t)
+			requestURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestURL, nil))
+			assert.Equal(t, recorder.Code, http.StatusInternalServerError)
+			var response errorResponse
+			assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, response.Code, "internal_error")
+		})
+	}
+}
+
 func TestServerRejectsRolloverOnConditionalTileHit(t *testing.T) {
 	data := []byte("complete parquet bytes")
 	path := filepath.Join(t.TempDir(), "tile.parquet")
