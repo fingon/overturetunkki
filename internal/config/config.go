@@ -19,13 +19,13 @@ const (
 	ModeSupervisor Mode = "supervisor"
 	ModeWorker     Mode = "worker"
 
-	DefaultListen               = ":8080"
-	DefaultCatalogURL           = "https://stac.overturemaps.org/catalog.json"
-	DefaultCatalogPollInterval  = time.Minute
-	DefaultCatalogTimeout       = 10 * time.Second
+	DefaultListen                     = ":8080"
+	DefaultCatalogURL                 = "https://stac.overturemaps.org/catalog.json"
+	DefaultCatalogPollInterval        = time.Minute
+	DefaultCatalogTimeout             = 10 * time.Second
 	DefaultMaxTileBytes         int64 = 8 * 1024 * 1024
 	DefaultMaxTileRows          int64 = 100_000
-	DefaultCacheDir              = "/var/cache/overture"
+	DefaultCacheDir                   = "/var/cache/overture"
 	DefaultCacheMaxBytes        int64 = 10 * 1024 * 1024 * 1024
 	DefaultCacheMaxEntries      int64 = 100_000
 	DefaultScratchMaxBytes      int64 = 2 * 1024 * 1024 * 1024
@@ -33,34 +33,34 @@ const (
 	DefaultWorkerMemoryBytes    int64 = 512 * 1024 * 1024
 	DefaultWorkerThreads        int64 = 2
 	DefaultQueueCapacity        int64 = 32
-	DefaultTileTimeout          = 30 * time.Second
+	DefaultTileTimeout                = 30 * time.Second
 	DefaultNegativeCacheEntries int64 = 10_000
-	DefaultNegativeCacheTTL     = 5 * time.Minute
-	DefaultWriteTimeout         = 30 * time.Second
+	DefaultNegativeCacheTTL           = 5 * time.Minute
+	DefaultWriteTimeout               = 30 * time.Second
 )
 
 type Config struct {
-	Mode                  Mode          `name:"mode" env:"OVERTURE_MODE" default:"supervisor" enum:"supervisor,worker" help:"Process mode."`
-	Listen                string        `name:"listen" env:"OVERTURE_LISTEN" default:":8080" help:"HTTP listen address."`
-	CatalogURL            string        `name:"catalog-url" env:"OVERTURE_CATALOG_URL" default:"https://stac.overturemaps.org/catalog.json" help:"Trusted STAC catalog endpoint."`
-	CatalogPollInterval   time.Duration `name:"catalog-poll-interval" env:"OVERTURE_CATALOG_POLL_INTERVAL" default:"1m" help:"Additional idle catalog refresh interval."`
-	CatalogTimeout        time.Duration `name:"catalog-timeout" env:"OVERTURE_CATALOG_TIMEOUT" default:"10s" help:"Complete catalog freshness-check deadline."`
-	Fields                []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,categories" sep:"," help:"Comma-separated top-level output fields."`
-	MaxTileBytes          int64         `name:"max-tile-bytes" env:"OVERTURE_MAX_TILE_BYTES" default:"8388608" help:"Maximum complete zstd Parquet tile size in bytes."`
-	MaxTileRows           int64         `name:"max-tile-rows" env:"OVERTURE_MAX_TILE_ROWS" default:"100000" help:"Additional early tile row rejection threshold."`
-	CacheDir              string        `name:"cache-dir" env:"OVERTURE_CACHE_DIR" default:"/var/cache/overture" help:"Exclusive writable cache root."`
-	CacheMaxBytes         int64         `name:"cache-max-bytes" env:"OVERTURE_CACHE_MAX_BYTES" default:"10737418240" help:"Complete files and reservations cache limit in bytes."`
-	CacheMaxEntries       int64         `name:"cache-max-entries" env:"OVERTURE_CACHE_MAX_ENTRIES" default:"100000" help:"Maximum cache file and metadata entries."`
-	ScratchMaxBytes       int64         `name:"scratch-max-bytes" env:"OVERTURE_SCRATCH_MAX_BYTES" default:"2147483648" help:"Total worker scratch allowance in bytes."`
-	WorkerCount           int64         `name:"worker-count" env:"OVERTURE_WORKER_COUNT" default:"2" help:"Concurrent DuckDB jobs."`
-	WorkerMemoryBytes     int64         `name:"worker-memory-bytes" env:"OVERTURE_WORKER_MEMORY_BYTES" default:"536870912" help:"DuckDB memory limit per worker in bytes."`
-	WorkerThreads         int64         `name:"worker-threads" env:"OVERTURE_WORKER_THREADS" default:"2" help:"DuckDB threads per worker."`
-	QueueCapacity         int64         `name:"queue-capacity" env:"OVERTURE_QUEUE_CAPACITY" default:"32" help:"Maximum waiting tile builds."`
-	TileTimeout           time.Duration `name:"tile-timeout" env:"OVERTURE_TILE_TIMEOUT" default:"30s" help:"Queue and tile query deadline."`
-	NegativeCacheEntries  int64         `name:"negative-cache-entries" env:"OVERTURE_NEGATIVE_CACHE_ENTRIES" default:"10000" help:"Maximum retained size rejections."`
-	NegativeCacheTTL      time.Duration `name:"negative-cache-ttl" env:"OVERTURE_NEGATIVE_CACHE_TTL" default:"5m" help:"Size rejection lifetime."`
-	WriteTimeout          time.Duration `name:"write-timeout" env:"OVERTURE_WRITE_TIMEOUT" default:"30s" help:"Maximum response transmission time."`
-	Verbose               bool          `short:"v" env:"OVERTURE_VERBOSE" help:"Set the default slog level to debug."`
+	Mode                 Mode          `name:"mode" env:"OVERTURE_MODE" default:"supervisor" enum:"supervisor,worker" help:"Process mode."`
+	Listen               string        `name:"listen" env:"OVERTURE_LISTEN" default:":8080" help:"HTTP listen address."`
+	CatalogURL           string        `name:"catalog-url" env:"OVERTURE_CATALOG_URL" default:"https://stac.overturemaps.org/catalog.json" help:"Trusted STAC catalog endpoint."`
+	CatalogPollInterval  time.Duration `name:"catalog-poll-interval" env:"OVERTURE_CATALOG_POLL_INTERVAL" default:"1m" help:"Additional idle catalog refresh interval."`
+	CatalogTimeout       time.Duration `name:"catalog-timeout" env:"OVERTURE_CATALOG_TIMEOUT" default:"10s" help:"Complete catalog freshness-check deadline."`
+	Fields               []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,categories" sep:"," help:"Comma-separated top-level output fields."`
+	MaxTileBytes         int64         `name:"max-tile-bytes" env:"OVERTURE_MAX_TILE_BYTES" default:"8388608" help:"Maximum complete zstd Parquet tile size in bytes."`
+	MaxTileRows          int64         `name:"max-tile-rows" env:"OVERTURE_MAX_TILE_ROWS" default:"100000" help:"Additional early tile row rejection threshold."`
+	CacheDir             string        `name:"cache-dir" env:"OVERTURE_CACHE_DIR" default:"/var/cache/overture" help:"Exclusive writable cache root."`
+	CacheMaxBytes        int64         `name:"cache-max-bytes" env:"OVERTURE_CACHE_MAX_BYTES" default:"10737418240" help:"Complete files and reservations cache limit in bytes."`
+	CacheMaxEntries      int64         `name:"cache-max-entries" env:"OVERTURE_CACHE_MAX_ENTRIES" default:"100000" help:"Maximum cache file and metadata entries."`
+	ScratchMaxBytes      int64         `name:"scratch-max-bytes" env:"OVERTURE_SCRATCH_MAX_BYTES" default:"2147483648" help:"Total worker scratch allowance in bytes."`
+	WorkerCount          int64         `name:"worker-count" env:"OVERTURE_WORKER_COUNT" default:"2" help:"Concurrent DuckDB jobs."`
+	WorkerMemoryBytes    int64         `name:"worker-memory-bytes" env:"OVERTURE_WORKER_MEMORY_BYTES" default:"536870912" help:"DuckDB memory limit per worker in bytes."`
+	WorkerThreads        int64         `name:"worker-threads" env:"OVERTURE_WORKER_THREADS" default:"2" help:"DuckDB threads per worker."`
+	QueueCapacity        int64         `name:"queue-capacity" env:"OVERTURE_QUEUE_CAPACITY" default:"32" help:"Maximum waiting tile builds."`
+	TileTimeout          time.Duration `name:"tile-timeout" env:"OVERTURE_TILE_TIMEOUT" default:"30s" help:"Queue and tile query deadline."`
+	NegativeCacheEntries int64         `name:"negative-cache-entries" env:"OVERTURE_NEGATIVE_CACHE_ENTRIES" default:"10000" help:"Maximum retained size rejections."`
+	NegativeCacheTTL     time.Duration `name:"negative-cache-ttl" env:"OVERTURE_NEGATIVE_CACHE_TTL" default:"5m" help:"Size rejection lifetime."`
+	WriteTimeout         time.Duration `name:"write-timeout" env:"OVERTURE_WRITE_TIMEOUT" default:"30s" help:"Maximum response transmission time."`
+	Verbose              bool          `short:"v" env:"OVERTURE_VERBOSE" help:"Set the default slog level to debug."`
 }
 
 var supportedFields = map[string]struct{}{

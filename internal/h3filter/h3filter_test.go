@@ -22,12 +22,12 @@ type membershipCase struct {
 }
 
 type syntheticPoint struct {
-	id             int
-	latitudeDeg    float64
-	longitudeDeg   float64
-	wrappedBBox    bool
-	nullBBox       bool
-	invalidBBox    bool
+	id           int
+	latitudeDeg  float64
+	longitudeDeg float64
+	wrappedBBox  bool
+	nullBBox     bool
+	invalidBBox  bool
 }
 
 func TestCellContains(t *testing.T) {
@@ -219,12 +219,12 @@ func TestBoundsIntersectsBBox(t *testing.T) {
 		},
 	}
 	cases := []struct {
-		name string
+		name            string
 		minLongitudeDeg float64
 		maxLongitudeDeg float64
 		minLatitudeDeg  float64
 		maxLatitudeDeg  float64
-		want             bool
+		want            bool
 	}{
 		{name: "ordinary overlap", minLongitudeDeg: 175, maxLongitudeDeg: 179, minLatitudeDeg: -1, maxLatitudeDeg: 1, want: true},
 		{name: "wrapped overlap", minLongitudeDeg: 179, maxLongitudeDeg: -179, minLatitudeDeg: -1, maxLatitudeDeg: 1, want: true},

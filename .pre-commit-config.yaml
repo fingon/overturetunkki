@@ -1,0 +1,30 @@
+minimum_pre_commit_version: "3.2.0"
+default_install_hook_types:
+  - pre-commit
+default_stages:
+  - pre-commit
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        types:
+          - go
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false

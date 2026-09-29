@@ -11,10 +11,10 @@ import (
 
 func TestNewLogLevel(t *testing.T) {
 	cases := []struct {
-		name        string
-		verbose     bool
-		wantDebug   bool
-		wantInfo    bool
+		name      string
+		verbose   bool
+		wantDebug bool
+		wantInfo  bool
 	}{
 		{name: "default", verbose: false, wantDebug: false, wantInfo: true},
 		{name: "verbose", verbose: true, wantDebug: true, wantInfo: true},

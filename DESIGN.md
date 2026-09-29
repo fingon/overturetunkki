@@ -372,7 +372,8 @@ errors. Catalog freshness checks still precede negative hits.
 ## Configuration and deployment
 
 The dependency build pins are recorded in `build/versions.env`: Go 1.27.1,
-ko 0.19.1, DuckDB 1.5.5 through duckdb-go v2.10505.0, and H3 Go v4.5.0.
+ko 0.19.1, prek 0.5.4, DuckDB 1.5.5 through duckdb-go v2.10505.0, and H3
+Go v4.5.0.
 The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
@@ -417,6 +418,12 @@ duration, and error metadata, without credentials. Metrics cover catalog
 changes/check failures, cache hits/misses, negative hits, eviction,
 bytes/reservations, workers/queue, latency, cancellation, and size rejection.
 Avoid H3 cells or release IDs as unbounded metric labels.
+
+The `Makefile` exposes `lint`, `test`, `build`, `image`, `smoke`, and `hooks`
+targets. `lint` runs `prek run --all-files`, including the pinned standard
+hooks, `gofmt`, and `go vet`; tests remain a separate target. The current image
+and smoke targets exercise the bundled native dependency probe. The pre-commit
+hook is installed with `make hooks`.
 
 Pin Go 1.27, ko, the DuckDB Go driver/core, H3, extensions, and runtime image.
 The [DuckDB Go client](https://duckdb.org/docs/current/clients/go/overview) uses

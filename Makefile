@@ -1,0 +1,46 @@
+SHELL := /bin/bash
+
+GO ?= go
+PREK ?= prek
+KO ?= ko
+DOCKER ?= docker
+TARGET_ARCH ?= $(shell $(GO) env GOARCH)
+CGO_ENABLED ?= 1
+BIN_DIR ?= bin
+SERVICE_BIN := $(BIN_DIR)/overturetunkki
+NATIVE_PROBE_BIN := $(BIN_DIR)/native-probe
+IMAGE_REPO ?= overturetunkki/native-probe
+IMAGE_TAG ?= dev
+IMAGE_REF := $(IMAGE_REPO):$(IMAGE_TAG)
+
+.PHONY: all lint test build fetch-extensions image smoke hooks clean
+
+all: test
+
+lint:
+	$(PREK) run --all-files
+
+test:
+	$(GO) test ./...
+
+build:
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(SERVICE_BIN) ./cmd/overturetunkki
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(NATIVE_PROBE_BIN) ./cmd/native-probe
+
+fetch-extensions:
+	./scripts/fetch-duckdb-extensions $(TARGET_ARCH)
+
+image: fetch-extensions
+	KO_DOCKER_REPO=$(IMAGE_REPO) $(KO) build --local --bare --tags $(IMAGE_TAG) ./cmd/native-probe
+
+smoke: image
+	$(DOCKER) run --rm --network=none --read-only --cap-drop=ALL \
+		--security-opt=no-new-privileges --user=65532:65532 \
+		--env KO_DATA_PATH=/ko-app $(IMAGE_REF)
+
+hooks:
+	$(PREK) install
+
+clean:
+	rm -rf $(BIN_DIR)

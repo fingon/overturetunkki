@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	copyHelperEnv       = "OVERTURE_TUNKKI_COPY_HELPER"
-	copyHelperModeEnv   = "OVERTURE_TUNKKI_COPY_MODE"
-	copyHelperPathEnv   = "OVERTURE_TUNKKI_COPY_PATH"
-	copyHelperLimitEnv  = "OVERTURE_TUNKKI_COPY_LIMIT_BYTES"
+	copyHelperEnv         = "OVERTURE_TUNKKI_COPY_HELPER"
+	copyHelperModeEnv     = "OVERTURE_TUNKKI_COPY_MODE"
+	copyHelperPathEnv     = "OVERTURE_TUNKKI_COPY_PATH"
+	copyHelperLimitEnv    = "OVERTURE_TUNKKI_COPY_LIMIT_BYTES"
 	copyHelperFailureExit = 42
 	copyHelperSpillExit   = 43
 	standardCopyMode      = "standard"

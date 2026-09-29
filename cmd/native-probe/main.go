@@ -13,14 +13,14 @@ import (
 )
 
 const (
-	probeResolution = 9
-	probeLatitude  = 37.775938728915946
-	probeLongitude = -122.41795063018799
-	dataPathEnv    = "KO_DATA_PATH"
-	extensionDirEnv = "OVERTURE_DUCKDB_EXTENSION_DIRECTORY"
-	httpfsExtensionName = "httpfs"
-	parquetExtensionName = "parquet"
-	spatialExtensionName = "spatial"
+	probeResolution         = 9
+	probeLatitude           = 37.775938728915946
+	probeLongitude          = -122.41795063018799
+	dataPathEnv             = "KO_DATA_PATH"
+	extensionDirEnv         = "OVERTURE_DUCKDB_EXTENSION_DIRECTORY"
+	httpfsExtensionName     = "httpfs"
+	parquetExtensionName    = "parquet"
+	spatialExtensionName    = "spatial"
 	extensionInventoryQuery = "SELECT extension_name, loaded, installed FROM duckdb_extensions() WHERE extension_name IN (?, ?, ?) ORDER BY extension_name"
 )
 

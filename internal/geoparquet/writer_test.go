@@ -25,13 +25,13 @@ import (
 )
 
 const (
-	fixtureUpdateEnv          = "OVERTURE_UPDATE_GEOPARQUET_FIXTURES"
-	sampleMinLongitudeDeg     = -122.4194
-	sampleMinLatitudeDeg      = 37.7749
-	sampleMaxLongitudeDeg     = 24.941
-	sampleMaxLatitudeDeg      = 60.171
-	sampleFirstLongitudeDeg   = 24.941
-	sampleFirstLatitudeDeg    = 60.171
+	fixtureUpdateEnv         = "OVERTURE_UPDATE_GEOPARQUET_FIXTURES"
+	sampleMinLongitudeDeg    = -122.4194
+	sampleMinLatitudeDeg     = 37.7749
+	sampleMaxLongitudeDeg    = 24.941
+	sampleMaxLatitudeDeg     = 60.171
+	sampleFirstLongitudeDeg  = 24.941
+	sampleFirstLatitudeDeg   = 60.171
 	sampleSecondLongitudeDeg = -122.4194
 	sampleSecondLatitudeDeg  = 37.7749
 	sampleNonEmptyRowCount   = 2
@@ -63,9 +63,9 @@ func TestDuckDBWritesGeoParquet(t *testing.T) {
 		wantPoints [][2]float64
 	}{
 		{
-			name:       "nested non-empty zstd",
-			selectSQL:  sampleSelectSQL(),
-			wantRows:   sampleNonEmptyRowCount,
+			name:      "nested non-empty zstd",
+			selectSQL: sampleSelectSQL(),
+			wantRows:  sampleNonEmptyRowCount,
 			wantPoints: [][2]float64{
 				{sampleFirstLongitudeDeg, sampleFirstLatitudeDeg},
 				{sampleSecondLongitudeDeg, sampleSecondLatitudeDeg},
@@ -113,9 +113,9 @@ func TestCommittedGeoParquetFixtures(t *testing.T) {
 		wantPoints [][2]float64
 	}{
 		{
-			name:       "places",
-			fileName:   "places.parquet",
-			wantRows:   sampleNonEmptyRowCount,
+			name:     "places",
+			fileName: "places.parquet",
+			wantRows: sampleNonEmptyRowCount,
 			wantPoints: [][2]float64{
 				{sampleFirstLongitudeDeg, sampleFirstLatitudeDeg},
 				{sampleSecondLongitudeDeg, sampleSecondLatitudeDeg},

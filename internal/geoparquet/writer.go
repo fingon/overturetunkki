@@ -15,9 +15,9 @@ const (
 )
 
 type GeoMetadata struct {
-	Version       string                 `json:"version"`
-	PrimaryColumn string                 `json:"primary_column"`
-	Columns       map[string]GeoColumn   `json:"columns"`
+	Version       string               `json:"version"`
+	PrimaryColumn string               `json:"primary_column"`
+	Columns       map[string]GeoColumn `json:"columns"`
 }
 
 type GeoColumn struct {
