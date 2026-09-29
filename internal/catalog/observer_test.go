@@ -110,6 +110,26 @@ func TestNewObserverValidatesOptions(t *testing.T) {
 	}
 }
 
+func TestObserverStartsUnreadyUntilFreshCheck(t *testing.T) {
+	startupErr := errors.New("stale startup state")
+	checker := &observerChecker{steps: []observerCheckStep{{err: startupErr}}}
+	observer, err := NewObserver(checker, time.Minute)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	_, err = observer.Current()
+	assert.Assert(t, errors.Is(err, ErrCatalogNotReady))
+
+	_, err = observer.Refresh(context.Background())
+	assert.ErrorContains(t, err, startupErr.Error())
+	state := observer.State()
+	assert.Assert(t, !state.Ready)
+	assert.Assert(t, errors.Is(state.Err, startupErr))
+	_, err = observer.Current()
+	assert.Assert(t, errors.Is(err, ErrCatalogUnavailable))
+}
+
 func TestObserverCoalescesOverlappingRefreshes(t *testing.T) {
 	release := make(chan struct{})
 	snapshot := observerTestSnapshot("old")
@@ -290,6 +310,59 @@ func TestObserverPublishesReplacementAndCancelsOldGeneration(t *testing.T) {
 	case <-newGeneration.Context.Done():
 		t.Fatal("new generation was canceled")
 	default:
+	}
+}
+
+func TestObserverPublishesRollbackAsNewGeneration(t *testing.T) {
+	oldSnapshot := observerTestSnapshot("old")
+	newSnapshot := observerTestSnapshot("new")
+	checker := &observerChecker{steps: []observerCheckStep{
+		{snapshot: oldSnapshot},
+		{snapshot: newSnapshot},
+		{snapshot: oldSnapshot},
+	}}
+	observer, err := NewObserver(checker, time.Minute)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+
+	_, err = observer.Refresh(context.Background())
+	assert.NilError(t, err)
+	oldGeneration, err := observer.Current()
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+
+	_, err = observer.Refresh(context.Background())
+	assert.NilError(t, err)
+	newGeneration, err := observer.Current()
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	assert.Equal(t, newGeneration.Number, oldGeneration.Number+1)
+	assert.Equal(t, newGeneration.Snapshot.Release, newSnapshot.Release)
+	select {
+	case <-oldGeneration.Context.Done():
+	default:
+		t.Fatal("old generation was not canceled")
+	}
+
+	_, err = observer.Refresh(context.Background())
+	assert.NilError(t, err)
+	rollbackGeneration, err := observer.Current()
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	assert.Equal(t, rollbackGeneration.Number, newGeneration.Number+1)
+	assert.Equal(t, rollbackGeneration.Snapshot.Release, oldSnapshot.Release)
+	select {
+	case <-newGeneration.Context.Done():
+	default:
+		t.Fatal("rolled-forward generation was not canceled")
 	}
 }
 

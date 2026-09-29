@@ -56,16 +56,24 @@ func (observer *testObserver) refreshCount() int {
 	return observer.refreshes
 }
 
+func (observer *testObserver) setSnapshot(snapshot catalog.Snapshot) {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	observer.snapshot = snapshot
+}
+
 type testProvider struct {
 	mu    sync.Mutex
 	tile  Tile
 	err   error
 	calls int
+	onGet func()
 }
 
 type blockingProvider struct {
 	started chan struct{}
 	release chan struct{}
+	tile    Tile
 	err     error
 	once    sync.Once
 }
@@ -74,7 +82,7 @@ func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Snapshot, _
 	provider.once.Do(func() { close(provider.started) })
 	select {
 	case <-provider.release:
-		return Tile{}, provider.err
+		return provider.tile, provider.err
 	case <-ctx.Done():
 		return Tile{}, ctx.Err()
 	}
@@ -113,9 +121,13 @@ func (writer *deadlineResponseWriter) deadlineValues() []time.Time {
 
 func (provider *testProvider) Get(context.Context, catalog.Snapshot, h3.Cell) (Tile, error) {
 	provider.mu.Lock()
-	defer provider.mu.Unlock()
 	provider.calls++
-	return provider.tile, provider.err
+	tile, err, onGet := provider.tile, provider.err, provider.onGet
+	provider.mu.Unlock()
+	if onGet != nil {
+		onGet()
+	}
+	return tile, err
 }
 
 func (provider *testProvider) callCount() int {
@@ -209,6 +221,75 @@ func TestServerTileVersionValidationAndConditionalResponse(t *testing.T) {
 	assert.DeepEqual(t, recorder.Body.Bytes(), data)
 	assert.Assert(t, observer.refreshCount() >= 7)
 	assert.Assert(t, provider.callCount() >= 3)
+}
+
+func TestServerRejectsRolloverOnConditionalTileHit(t *testing.T) {
+	data := []byte("complete parquet bytes")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	digest := sha256.Sum256(data)
+	oldSnapshot := testSnapshot()
+	newSnapshot := testSnapshotRelease("2026-09-30.1")
+	observer := &testObserver{snapshot: oldSnapshot}
+	provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])}}
+	provider.onGet = func() { observer.setSnapshot(newSnapshot) }
+	server, err := New(testOptions(observer, provider))
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	cell := testCell(t)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+cell.String()+"?catalog_version="+url.QueryEscape(oldSnapshot.CatalogVersion), nil)
+	request.Header.Set("If-None-Match", `"`+provider.tile.Digest+`"`)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	assert.Equal(t, recorder.Code, http.StatusConflict)
+	assert.Assert(t, recorder.Header().Get("Content-Type") != contentTypeParquet)
+	assert.Assert(t, recorder.Header().Get("Content-Length") == "")
+	var response errorResponse
+	assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, response.Code, "catalog_changed")
+	assert.Equal(t, response.CatalogVersion, newSnapshot.CatalogVersion)
+	assert.Equal(t, provider.callCount(), 1)
+}
+
+func TestServerRejectsRolloverDuringTileBuildBeforeHeaders(t *testing.T) {
+	data := []byte("complete parquet bytes")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	digest := sha256.Sum256(data)
+	oldSnapshot := testSnapshot()
+	newSnapshot := testSnapshotRelease("2026-09-30.1")
+	observer := &testObserver{snapshot: oldSnapshot}
+	provider := &blockingProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		tile:    Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])},
+	}
+	server, err := New(testOptions(observer, provider))
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	cell := testCell(t)
+	requestURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(oldSnapshot.CatalogVersion)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestURL, nil))
+		done <- recorder
+	}()
+	<-provider.started
+	observer.setSnapshot(newSnapshot)
+	close(provider.release)
+	recorder := <-done
+	assert.Equal(t, recorder.Code, http.StatusConflict)
+	assert.Assert(t, recorder.Header().Get("Content-Type") != contentTypeParquet)
+	assert.Assert(t, recorder.Header().Get("Content-Length") == "")
+	var response errorResponse
+	assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, response.Code, "catalog_changed")
+	assert.Equal(t, response.CatalogVersion, newSnapshot.CatalogVersion)
 }
 
 func TestServerRequestIDsBackpressureAndMetrics(t *testing.T) {
@@ -459,9 +540,13 @@ func testOptions(observer CatalogObserver, provider TileProvider) Options {
 }
 
 func testSnapshot() catalog.Snapshot {
+	return testSnapshotRelease("2026-09-23.1")
+}
+
+func testSnapshotRelease(release string) catalog.Snapshot {
 	return catalog.Snapshot{
-		Release:        "2026-09-23.1",
-		CatalogVersion: "2026-09-23.1+sha256:test",
+		Release:        release,
+		CatalogVersion: release + "+sha256:test",
 		ProjectionID:   "sha256:projection",
 		CollectionID:   catalog.DefaultCollectionID,
 	}

@@ -135,6 +135,12 @@ helps recovery but never establishes currentness by itself. Clients must compare
 versions, discard old tiles, and refresh on resuming a session; the server cannot
 revoke data already downloaded by a client.
 
+Deterministic tests cover unavailable and malformed STAC documents, unsupported
+schemas, same-release manifest changes, release rollback, cold-start validators
+without cached bodies, cached tile hits, builds, and the final pre-header
+catalog check. A persisted tile keyed by an older catalog version cannot satisfy
+a request keyed by a newer version.
+
 ## HTTP contract
 
 | Endpoint | Behavior |

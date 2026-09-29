@@ -207,6 +207,37 @@ func TestCachePublishesPinsEvictsAndPersists(t *testing.T) {
 	assert.NilError(t, reopened.Close())
 }
 
+func TestCacheReopenDoesNotServeOldGenerationForNewKey(t *testing.T) {
+	root := t.TempDir()
+	cache, err := New(Options{Root: root, MaxBytes: 10, MaxEntries: 2})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	oldKey := testKey()
+	oldKey.CatalogVersion = "old-release"
+	publishTestEntry(t, cache, oldKey, 4, oldKey.CatalogVersion)
+	assert.NilError(t, cache.Close())
+
+	reopened, err := New(Options{Root: root, MaxBytes: 10, MaxEntries: 2})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	newKey := oldKey
+	newKey.CatalogVersion = "new-release"
+	_, err = reopened.Open(newKey)
+	assert.Assert(t, errors.Is(err, ErrEntryNotFound))
+	reader, err := reopened.Open(oldKey)
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, reopened.Close())
+		return
+	}
+	assert.NilError(t, reader.Close())
+	assert.NilError(t, reopened.Close())
+}
+
 func TestCachePinnedCapacityAndCorruptStartupCleanup(t *testing.T) {
 	root := t.TempDir()
 	cache, err := New(Options{Root: root, MaxBytes: 8, MaxEntries: 1})

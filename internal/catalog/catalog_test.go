@@ -215,6 +215,51 @@ func TestRefreshFailsClosedAfterCatalogUnavailable(t *testing.T) {
 	assert.Equal(t, snapshot.CatalogVersion, "")
 }
 
+func TestRefreshRejectsMalformedCatalogDocuments(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "root", path: "/catalog.json"},
+		{name: "release", path: "/" + fixtureRelease + "/catalog.json"},
+		{name: "places", path: "/" + fixtureRelease + "/places/catalog.json"},
+		{name: "collection", path: "/" + fixtureRelease + "/places/place/collection.json"},
+		{name: "item", path: "/" + fixtureRelease + "/places/place/00000/00000.json"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCatalogFixtureServer(t)
+			fixture.mu.Lock()
+			fixture.mutate = func(path string, body []byte) []byte {
+				if path == test.path {
+					return []byte("{")
+				}
+				return body
+			}
+			fixture.mu.Unlock()
+			manager, err := New(fixture.options())
+			assert.NilError(t, err)
+			if err != nil {
+				return
+			}
+			_, err = manager.Refresh(context.Background())
+			assert.ErrorContains(t, err, "decode")
+		})
+	}
+}
+
+func TestRefreshRejectsNotModifiedWithoutCachedBody(t *testing.T) {
+	fixture := newCatalogFixtureServer(t)
+	fixture.setStatus("/catalog.json", http.StatusNotModified)
+	manager, err := New(fixture.options())
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	_, err = manager.Refresh(context.Background())
+	assert.ErrorContains(t, err, "without a cached body")
+}
+
 func TestRefreshChangesCatalogVersionForManifestChange(t *testing.T) {
 	fixture := newCatalogFixtureServer(t)
 	manager, err := New(fixture.options())
@@ -251,6 +296,16 @@ func TestRefreshRejectsInvalidCatalogData(t *testing.T) {
 		mutate  func(string, []byte) []byte
 		message string
 	}{
+		{
+			name: "unsupported GeoParquet version",
+			mutate: func(path string, body []byte) []byte {
+				if !strings.HasSuffix(path, "/collection.json") {
+					return body
+				}
+				return bytes.Replace(body, []byte(`"geoparquet:version":"1.1.0"`), []byte(`"geoparquet:version":"1.0.0"`), 1)
+			},
+			message: "GeoParquet version",
+		},
 		{
 			name: "unsupported primary geometry",
 			mutate: func(path string, body []byte) []byte {

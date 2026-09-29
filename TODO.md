@@ -45,7 +45,7 @@ items below are pending;
 - [x] Implement serialized observations, overlapping-check coalescing, idle
   polling, startup readiness, generation fencing before replacement validation,
   cancellation of old jobs, and fail-closed behavior on check failures.
-- [ ] Test rollover on cache hits, during build and before headers; unavailable
+- [x] Test rollover on cache hits, during build and before headers; unavailable
   and malformed catalogs; unsupported schemas; same-release manifest changes;
   rollback observations; and stale persisted startup state.
 
