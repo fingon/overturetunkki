@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mstenber/overturetunkki/internal/cache"
 	"github.com/mstenber/overturetunkki/internal/catalog"
@@ -60,6 +61,54 @@ type testProvider struct {
 	tile  Tile
 	err   error
 	calls int
+}
+
+type blockingProvider struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+	once    sync.Once
+}
+
+func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Snapshot, _ h3.Cell) (Tile, error) {
+	provider.once.Do(func() { close(provider.started) })
+	select {
+	case <-provider.release:
+		return Tile{}, provider.err
+	case <-ctx.Done():
+		return Tile{}, ctx.Err()
+	}
+}
+
+type deadlineResponseWriter struct {
+	inner     *httptest.ResponseRecorder
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (writer *deadlineResponseWriter) Header() http.Header {
+	return writer.inner.Header()
+}
+
+func (writer *deadlineResponseWriter) Write(data []byte) (int, error) {
+	return writer.inner.Write(data)
+}
+
+func (writer *deadlineResponseWriter) WriteHeader(status int) {
+	writer.inner.WriteHeader(status)
+}
+
+func (writer *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.deadlines = append(writer.deadlines, deadline)
+	return nil
+}
+
+func (writer *deadlineResponseWriter) deadlineValues() []time.Time {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return append([]time.Time(nil), writer.deadlines...)
 }
 
 func (provider *testProvider) Get(context.Context, catalog.Snapshot, h3.Cell) (Tile, error) {
@@ -162,6 +211,151 @@ func TestServerTileVersionValidationAndConditionalResponse(t *testing.T) {
 	assert.Assert(t, provider.callCount() >= 3)
 }
 
+func TestServerRequestIDsBackpressureAndMetrics(t *testing.T) {
+	observer := &testObserver{snapshot: testSnapshot()}
+	provider := &testProvider{err: cache.ErrCapacityUnavailable}
+	options := testOptions(observer, provider)
+	options.TileConcurrency = 1
+	server, err := New(options)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+
+	catalogRequest := httptest.NewRequest(http.MethodGet, "/v1/catalog", nil)
+	catalogRequest.Header.Set(requestIDHeader, "client-42")
+	catalogRecorder := httptest.NewRecorder()
+	server.ServeHTTP(catalogRecorder, catalogRequest)
+	assert.Equal(t, catalogRecorder.Code, http.StatusOK)
+	assert.Equal(t, catalogRecorder.Header().Get(requestIDHeader), "client-42")
+
+	invalidRecorder := httptest.NewRecorder()
+	server.ServeHTTP(invalidRecorder, httptest.NewRequest(http.MethodGet, "/v1/tiles/places/not-an-h3-cell", nil))
+	assert.Equal(t, invalidRecorder.Code, http.StatusBadRequest)
+	assert.Assert(t, validRequestID(invalidRecorder.Header().Get(requestIDHeader)))
+
+	cell := testCell(t)
+	tileURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+	capacityRecorder := httptest.NewRecorder()
+	server.ServeHTTP(capacityRecorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+	assert.Equal(t, capacityRecorder.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, capacityRecorder.Header().Get("Retry-After"), retryAfterSeconds)
+	var response errorResponse
+	assert.NilError(t, json.Unmarshal(capacityRecorder.Body.Bytes(), &response))
+	assert.Equal(t, response.Code, "capacity_unavailable")
+
+	metricsRecorder := httptest.NewRecorder()
+	server.ServeHTTP(metricsRecorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	assert.Equal(t, metricsRecorder.Code, http.StatusOK)
+	metrics := metricsRecorder.Body.String()
+	assert.Assert(t, strings.Contains(metrics, "overture_http_catalog_requests_total 1\n"))
+	assert.Assert(t, strings.Contains(metrics, "overture_http_tile_requests_total 2\n"))
+	assert.Assert(t, strings.Contains(metrics, "overture_http_errors_4xx_total 1\n"))
+	assert.Assert(t, strings.Contains(metrics, "overture_http_errors_5xx_total 1\n"))
+	assert.Assert(t, strings.Contains(metrics, "overture_http_capacity_rejections_total 1\n"))
+	assert.Assert(t, strings.Contains(metrics, "overture_catalog_ready 1\n"))
+}
+
+func TestServerShutdownDrainsAndRejectsNewRequests(t *testing.T) {
+	observer := &testObserver{snapshot: testSnapshot()}
+	provider := &blockingProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		err:     worker.ErrTileTimeout,
+	}
+	options := testOptions(observer, provider)
+	options.TileConcurrency = 1
+	server, err := New(options)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	cell := testCell(t)
+	tileURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+		firstDone <- recorder
+	}()
+	<-provider.started
+
+	capacityRecorder := httptest.NewRecorder()
+	server.ServeHTTP(capacityRecorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+	assert.Equal(t, capacityRecorder.Code, http.StatusServiceUnavailable)
+	var capacityResponse errorResponse
+	assert.NilError(t, json.Unmarshal(capacityRecorder.Body.Bytes(), &capacityResponse))
+	assert.Equal(t, capacityResponse.Code, "capacity_unavailable")
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- server.Shutdown(context.Background()) }()
+	waitForShutdown(t, server)
+	select {
+	case err := <-shutdownDone:
+		assert.Assert(t, false, "shutdown returned while tile request was active: %v", err)
+	default:
+	}
+
+	shutdownRecorder := httptest.NewRecorder()
+	server.ServeHTTP(shutdownRecorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+	assert.Equal(t, shutdownRecorder.Code, http.StatusServiceUnavailable)
+	assert.Equal(t, shutdownRecorder.Header().Get("Retry-After"), retryAfterSeconds)
+	var shutdownResponse errorResponse
+	assert.NilError(t, json.Unmarshal(shutdownRecorder.Body.Bytes(), &shutdownResponse))
+	assert.Equal(t, shutdownResponse.Code, "server_shutting_down")
+
+	close(provider.release)
+	assert.NilError(t, <-shutdownDone)
+	firstRecorder := <-firstDone
+	assert.Equal(t, firstRecorder.Code, http.StatusGatewayTimeout)
+}
+
+func TestServerSetsTileWriteDeadline(t *testing.T) {
+	data := []byte("complete parquet bytes")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	digest := sha256.Sum256(data)
+	observer := &testObserver{snapshot: testSnapshot()}
+	provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])}}
+	options := testOptions(observer, provider)
+	options.WriteTimeout = time.Second
+	server, err := New(options)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	cell := testCell(t)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+cell.String()+"?catalog_version="+url.QueryEscape(observer.snapshot.CatalogVersion), nil)
+	writer := &deadlineResponseWriter{inner: httptest.NewRecorder()}
+	server.ServeHTTP(writer, request)
+	assert.Equal(t, writer.inner.Code, http.StatusOK)
+	deadlines := writer.deadlineValues()
+	assert.Equal(t, len(deadlines), 2)
+	assert.Assert(t, !deadlines[0].IsZero())
+	assert.Assert(t, deadlines[1].IsZero())
+}
+
+func waitForShutdown(t *testing.T, server *Server) {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		server.stateMu.Lock()
+		shuttingDown := server.shuttingDown
+		server.stateMu.Unlock()
+		if shuttingDown {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("server did not enter shutdown")
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestServerMapsTileFailuresAndCatalogReadiness(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -240,6 +434,8 @@ func TestNewServerValidatesOptions(t *testing.T) {
 		{name: "provider", options: Options{Observer: observer, Fields: []string{"id"}, MaxTileBytes: 1, MaxTileRows: 1}, message: "provider"},
 		{name: "fields", options: Options{Observer: observer, Provider: provider, MaxTileBytes: 1, MaxTileRows: 1}, message: "fields"},
 		{name: "limits", options: Options{Observer: observer, Provider: provider, Fields: []string{"id"}}, message: "limits"},
+		{name: "tile concurrency", options: Options{Observer: observer, Provider: provider, Fields: []string{"id"}, MaxTileBytes: 1, MaxTileRows: 1, TileConcurrency: -1}, message: "tile concurrency"},
+		{name: "write timeout", options: Options{Observer: observer, Provider: provider, Fields: []string{"id"}, MaxTileBytes: 1, MaxTileRows: 1, WriteTimeout: -time.Second}, message: "write timeout"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

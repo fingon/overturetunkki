@@ -4,7 +4,8 @@ The repository contains the design and the completed native dependency build,
 H3 filtering, bounded worker query/output validation, GeoParquet writer
 compatibility, typed command configuration, CI build gates, catalog validation,
 catalog observation, cache ownership/admission and persistence primitives, and
-the tested HTTP endpoint contract. Remaining items below are pending;
+the tested HTTP endpoint contract and its request/operations controls. Remaining
+items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -84,7 +85,7 @@ the tested HTTP endpoint contract. Remaining items below are pending;
 - [x] Implement finer-resolution guidance and resolution-15 terminal errors.
   Document viewport coverage rather than logical-child-only refinement, client
   deduplication, version replacement, and refresh after session resume.
-- [ ] Add request IDs, structured error logs, bounded-cardinality metrics,
+- [x] Add request IDs, structured error logs, bounded-cardinality metrics,
   backpressure/Retry-After, slow-reader deadlines, and graceful shutdown.
 - [ ] Exercise the complete container with writable volume limits and read-only
   root, an independent GeoParquet reader, concurrent clients, release rollover,

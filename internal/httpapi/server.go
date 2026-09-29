@@ -11,7 +11,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mstenber/overturetunkki/internal/cache"
 	"github.com/mstenber/overturetunkki/internal/catalog"
@@ -20,13 +22,23 @@ import (
 )
 
 const (
-	contentTypeJSON      = "application/json; charset=utf-8"
-	contentTypeParquet   = "application/vnd.apache.parquet"
-	cacheControlFresh    = "no-cache, must-revalidate"
-	releaseHeader        = "Overture-Release"
-	catalogVersionHeader = "Overture-Catalog-Version"
-	projectionHeader     = "Overture-Projection-ID"
+	contentTypeJSON            = "application/json; charset=utf-8"
+	contentTypeParquet         = "application/vnd.apache.parquet"
+	cacheControlFresh          = "no-cache, must-revalidate"
+	releaseHeader              = "Overture-Release"
+	catalogVersionHeader       = "Overture-Catalog-Version"
+	projectionHeader           = "Overture-Projection-ID"
+	requestIDHeader            = "X-Request-ID"
+	retryAfterSeconds          = "1"
+	defaultTileConcurrency     = 2
+	defaultWriteTimeout        = 30 * time.Second
+	capacityUnavailableCode    = "capacity_unavailable"
+	capacityUnavailableMessage = "tile capacity is unavailable"
+	serverShuttingDownCode     = "server_shutting_down"
+	serverShuttingDownMessage  = "HTTP server is shutting down"
 )
+
+var ErrServerShuttingDown = errors.New(serverShuttingDownMessage)
 
 type CatalogObserver interface {
 	Refresh(context.Context) (catalog.Snapshot, error)
@@ -44,20 +56,37 @@ type Tile struct {
 }
 
 type Options struct {
-	Observer       CatalogObserver
-	Provider       TileProvider
-	Fields         []string
-	MaxTileBytes   int64
-	MaxTileRows    int64
-	AttributionURL []string
+	Observer        CatalogObserver
+	Provider        TileProvider
+	Fields          []string
+	MaxTileBytes    int64
+	MaxTileRows     int64
+	AttributionURL  []string
+	TileConcurrency int
+	WriteTimeout    time.Duration
 }
 
 type Server struct {
-	observer CatalogObserver
-	provider TileProvider
-	fields   []string
-	options  Options
-	requests atomic.Uint64
+	observer        CatalogObserver
+	provider        TileProvider
+	fields          []string
+	options         Options
+	requests        atomic.Uint64
+	catalogRequests atomic.Uint64
+	tileRequests    atomic.Uint64
+	error4xx        atomic.Uint64
+	error5xx        atomic.Uint64
+	capacityRejects atomic.Uint64
+	requestSequence atomic.Uint64
+	tileAdmissions  chan struct{}
+	stateMu         sync.Mutex
+	activeRequests  sync.WaitGroup
+	shuttingDown    bool
+}
+
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	status int
 }
 
 type catalogResponse struct {
@@ -99,11 +128,29 @@ func New(options Options) (*Server, error) {
 	if options.MaxTileBytes <= 0 || options.MaxTileRows <= 0 {
 		return nil, fmt.Errorf("HTTP server tile limits must be positive")
 	}
+	if options.TileConcurrency < 0 {
+		return nil, fmt.Errorf("HTTP server tile concurrency must not be negative")
+	}
+	if options.WriteTimeout < 0 {
+		return nil, fmt.Errorf("HTTP server write timeout must not be negative")
+	}
+	if options.TileConcurrency == 0 {
+		options.TileConcurrency = defaultTileConcurrency
+	}
+	if options.WriteTimeout == 0 {
+		options.WriteTimeout = defaultWriteTimeout
+	}
 	fields := append([]string(nil), options.Fields...)
 	attribution := append([]string(nil), options.AttributionURL...)
 	options.Fields = fields
 	options.AttributionURL = attribution
-	return &Server{observer: options.Observer, provider: options.Provider, fields: fields, options: options}, nil
+	return &Server{
+		observer:       options.Observer,
+		provider:       options.Provider,
+		fields:         fields,
+		options:        options,
+		tileAdmissions: make(chan struct{}, options.TileConcurrency),
+	}, nil
 }
 
 func (server *Server) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
@@ -111,20 +158,157 @@ func (server *Server) ServeHTTP(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "HTTP server is unavailable"})
 		return
 	}
+	requestID := server.requestID(request)
+	request.Header.Set(requestIDHeader, requestID)
+	responseWriter.Header().Set(requestIDHeader, requestID)
+	trackedWriter := &trackingResponseWriter{ResponseWriter: responseWriter}
 	server.requests.Add(1)
+	server.countEndpoint(request.URL.Path)
+	if !server.beginRequest() {
+		writeError(trackedWriter, http.StatusServiceUnavailable, errorResponse{Code: serverShuttingDownCode, Message: serverShuttingDownMessage, Retryable: true})
+		server.finishRequest(trackedWriter, request, requestID)
+		return
+	}
+	defer func() {
+		server.finishRequest(trackedWriter, request, requestID)
+		server.activeRequests.Done()
+	}()
 	switch {
 	case request.URL.Path == "/v1/catalog":
-		server.serveCatalog(responseWriter, request)
+		server.serveCatalog(trackedWriter, request)
 	case strings.HasPrefix(request.URL.Path, "/v1/tiles/places/"):
-		server.serveTile(responseWriter, request)
+		server.serveTile(trackedWriter, request)
 	case request.URL.Path == "/livez":
-		server.serveLive(responseWriter, request)
+		server.serveLive(trackedWriter, request)
 	case request.URL.Path == "/readyz":
-		server.serveReady(responseWriter, request)
+		server.serveReady(trackedWriter, request)
 	case request.URL.Path == "/metrics":
-		server.serveMetrics(responseWriter, request)
+		server.serveMetrics(trackedWriter, request)
 	default:
-		writeError(responseWriter, http.StatusNotFound, errorResponse{Code: "not_found", Message: "endpoint not found"})
+		writeError(trackedWriter, http.StatusNotFound, errorResponse{Code: "not_found", Message: "endpoint not found"})
+	}
+}
+
+func (writer *trackingResponseWriter) WriteHeader(status int) {
+	if writer.status != 0 {
+		return
+	}
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *trackingResponseWriter) Write(data []byte) (int, error) {
+	if writer.status == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *trackingResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (server *Server) requestID(request *http.Request) string {
+	candidate := strings.TrimSpace(request.Header.Get(requestIDHeader))
+	if validRequestID(candidate) {
+		return candidate
+	}
+	return fmt.Sprintf("req-%d", server.requestSequence.Add(1))
+}
+
+func validRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '-' && character != '_' && character != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func (server *Server) countEndpoint(path string) {
+	switch {
+	case path == "/v1/catalog":
+		server.catalogRequests.Add(1)
+	case strings.HasPrefix(path, "/v1/tiles/places/"):
+		server.tileRequests.Add(1)
+	}
+}
+
+func (server *Server) beginRequest() bool {
+	server.stateMu.Lock()
+	defer server.stateMu.Unlock()
+	if server.shuttingDown {
+		return false
+	}
+	server.activeRequests.Add(1)
+	return true
+}
+
+func (server *Server) finishRequest(writer *trackingResponseWriter, request *http.Request, requestID string) {
+	status := writer.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	switch {
+	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+		server.error4xx.Add(1)
+	case status >= http.StatusInternalServerError:
+		server.error5xx.Add(1)
+	}
+	if status >= http.StatusBadRequest {
+		logLevel := slog.LevelWarn
+		if status >= http.StatusInternalServerError {
+			logLevel = slog.LevelError
+		}
+		slog.Log(request.Context(), logLevel, "HTTP request failed", "request_id", requestID, "method", request.Method, "path", request.URL.Path, "status", status)
+	}
+}
+
+func (server *Server) acquireTile() error {
+	server.stateMu.Lock()
+	defer server.stateMu.Unlock()
+	if server.shuttingDown {
+		return ErrServerShuttingDown
+	}
+	select {
+	case server.tileAdmissions <- struct{}{}:
+		return nil
+	default:
+		server.capacityRejects.Add(1)
+		return cache.ErrCapacityUnavailable
+	}
+}
+
+func (server *Server) releaseTile() {
+	<-server.tileAdmissions
+}
+
+func (server *Server) Shutdown(ctx context.Context) error {
+	if server == nil {
+		return fmt.Errorf("HTTP server is nil")
+	}
+	if ctx == nil {
+		return fmt.Errorf("HTTP shutdown context is nil")
+	}
+	server.stateMu.Lock()
+	server.shuttingDown = true
+	server.stateMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		server.activeRequests.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown HTTP server: %w", ctx.Err())
 	}
 }
 
@@ -135,6 +319,7 @@ func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *
 	}
 	snapshot, err := server.refresh(request.Context())
 	if err != nil {
+		slog.Error("refresh catalog for HTTP response", "request_id", request.Header.Get(requestIDHeader), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
 		return
 	}
@@ -170,6 +355,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	}
 	snapshot, err := server.refresh(request.Context())
 	if err != nil {
+		slog.Error("refresh catalog for tile request", "request_id", request.Header.Get(requestIDHeader), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
 		return
 	}
@@ -177,18 +363,37 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: "catalog_changed", Message: "catalog version is stale", Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion})
 		return
 	}
+	if err := server.acquireTile(); err != nil {
+		if errors.Is(err, ErrServerShuttingDown) {
+			writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: serverShuttingDownCode, Message: serverShuttingDownMessage, Retryable: true})
+			return
+		}
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: capacityUnavailableCode, Message: capacityUnavailableMessage, Retryable: true})
+		return
+	}
+	defer server.releaseTile()
 	tile, err := server.provider.Get(request.Context(), snapshot, cell)
 	if err != nil {
 		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
+		if errors.Is(err, cache.ErrCapacityUnavailable) {
+			server.capacityRejects.Add(1)
+		}
+		logLevel := slog.LevelError
+		if status < http.StatusInternalServerError {
+			logLevel = slog.LevelWarn
+		}
+		slog.Log(request.Context(), logLevel, "tile request failed", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "status", status, "error", err)
 		writeError(responseWriter, status, response)
 		return
 	}
 	latest, err := server.refresh(request.Context())
 	if err != nil {
+		slog.Error("refresh catalog before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
 		return
 	}
 	if latest.CatalogVersion != snapshot.CatalogVersion || latest.Release != snapshot.Release {
+		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: "catalog_changed", Message: "catalog changed before response", Release: latest.Release, CatalogVersion: latest.CatalogVersion})
 		return
 	}
@@ -197,23 +402,49 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 
 func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request *http.Request, snapshot catalog.Snapshot, tile Tile) {
 	if tile.Path == "" || tile.SizeBytes <= 0 || tile.Digest == "" || strings.ContainsAny(tile.Digest, "\"\r\n") {
+		slog.Error("tile metadata is invalid", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "size_bytes", tile.SizeBytes)
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata is invalid"})
 		return
 	}
 	file, err := os.Open(tile.Path)
 	if err != nil {
+		slog.Error("open tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile cannot be opened"})
 		return
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			slog.Error("close tile response file", "path", tile.Path, "error", closeErr)
+			slog.Error("close tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", closeErr)
 		}
 	}()
 	fileInfo, err := file.Stat()
 	if err != nil || !fileInfo.Mode().IsRegular() || fileInfo.Size() != tile.SizeBytes {
+		if err != nil {
+			slog.Error("stat tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
+		} else {
+			slog.Error("tile response file does not match metadata", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "expected_bytes", tile.SizeBytes, "actual_bytes", fileInfo.Size(), "regular", fileInfo.Mode().IsRegular())
+		}
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata does not match file"})
 		return
+	}
+	responseController := http.NewResponseController(responseWriter)
+	deadlineSet := false
+	if err := responseController.SetWriteDeadline(time.Now().Add(server.options.WriteTimeout)); err != nil {
+		if !errors.Is(err, http.ErrNotSupported) {
+			slog.Error("set tile response write deadline", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
+			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile response deadline cannot be set"})
+			return
+		}
+		slog.Debug("tile response writer does not support write deadlines", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path)
+	} else {
+		deadlineSet = true
+	}
+	if deadlineSet {
+		defer func() {
+			if resetErr := responseController.SetWriteDeadline(time.Time{}); resetErr != nil && !errors.Is(resetErr, http.ErrNotSupported) {
+				slog.Error("clear tile response write deadline", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", resetErr)
+			}
+		}()
 	}
 	etag := `"` + tile.Digest + `"`
 	server.writeVersionHeaders(responseWriter, snapshot)
@@ -227,7 +458,7 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 	}
 	responseWriter.WriteHeader(http.StatusOK)
 	if _, err := io.CopyN(responseWriter, file, tile.SizeBytes); err != nil {
-		slog.Error("stream tile response", "path", tile.Path, "error", err)
+		slog.Error("stream tile response", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
 	}
 }
 
@@ -246,6 +477,7 @@ func (server *Server) serveReady(responseWriter http.ResponseWriter, request *ht
 	}
 	generation, err := server.observer.Current()
 	if err != nil {
+		slog.Warn("catalog readiness check failed", "request_id", request.Header.Get(requestIDHeader), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is not ready", Retryable: true})
 		return
 	}
@@ -260,12 +492,14 @@ func (server *Server) serveMetrics(responseWriter http.ResponseWriter, request *
 	ready := 0
 	if _, err := server.observer.Current(); err == nil {
 		ready = 1
+	} else {
+		slog.Warn("catalog readiness metric is unavailable", "request_id", request.Header.Get(requestIDHeader), "error", err)
 	}
 	responseWriter.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	responseWriter.WriteHeader(http.StatusOK)
-	_, err := fmt.Fprintf(responseWriter, "# TYPE overture_http_requests_total counter\noverture_http_requests_total %d\n# TYPE overture_catalog_ready gauge\noverture_catalog_ready %d\n", server.requests.Load(), ready)
+	_, err := fmt.Fprintf(responseWriter, "# TYPE overture_http_requests_total counter\noverture_http_requests_total %d\n# TYPE overture_http_catalog_requests_total counter\noverture_http_catalog_requests_total %d\n# TYPE overture_http_tile_requests_total counter\noverture_http_tile_requests_total %d\n# TYPE overture_http_errors_4xx_total counter\noverture_http_errors_4xx_total %d\n# TYPE overture_http_errors_5xx_total counter\noverture_http_errors_5xx_total %d\n# TYPE overture_http_capacity_rejections_total counter\noverture_http_capacity_rejections_total %d\n# TYPE overture_catalog_ready gauge\noverture_catalog_ready %d\n", server.requests.Load(), server.catalogRequests.Load(), server.tileRequests.Load(), server.error4xx.Load(), server.error5xx.Load(), server.capacityRejects.Load(), ready)
 	if err != nil {
-		slog.Error("write metrics response", "error", err)
+		slog.Error("write metrics response", "request_id", request.Header.Get(requestIDHeader), "error", err)
 	}
 }
 
@@ -294,7 +528,7 @@ func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorR
 	case errors.Is(err, worker.ErrTooManyRows):
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "rows", "tile exceeds the row limit")
 	case errors.Is(err, cache.ErrCapacityUnavailable):
-		return http.StatusServiceUnavailable, errorResponse{Code: "capacity_unavailable", Message: "tile capacity is unavailable", Retryable: true}
+		return http.StatusServiceUnavailable, errorResponse{Code: capacityUnavailableCode, Message: capacityUnavailableMessage, Retryable: true}
 	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, errorResponse{Code: "tile_timeout", Message: "tile build timed out", Retryable: true}
 	case errors.Is(err, worker.ErrUpstream):
@@ -350,5 +584,8 @@ func writeJSON(responseWriter http.ResponseWriter, status int, value any) {
 }
 
 func writeError(responseWriter http.ResponseWriter, status int, response errorResponse) {
+	if status == http.StatusServiceUnavailable && response.Retryable {
+		responseWriter.Header().Set("Retry-After", retryAfterSeconds)
+	}
 	writeJSON(responseWriter, status, response)
 }

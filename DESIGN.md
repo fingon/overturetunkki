@@ -166,9 +166,20 @@ Errors are JSON with `code`, `message`, `retryable`, and known catalog context:
 | 400 | `invalid_request` | Correct parameters. |
 | 409 | `catalog_changed` | Refresh catalog and discard old tiles. |
 | 422 | `tile_too_large` | Request a finer H3 resolution. |
-| 503 | `catalog_unavailable`, `capacity_unavailable`, `upstream_unavailable` | Retry with backoff; honor `Retry-After`. |
+| 503 | `catalog_unavailable`, `capacity_unavailable`, `upstream_unavailable`, `server_shutting_down` | Retry with backoff; honor `Retry-After`. |
 | 504 | `tile_timeout` | Retry later; this does not prove the tile is oversized. |
 | 500 | `internal_error` | Report request ID; server logs the cause. |
+
+Every response carries an `X-Request-ID`. A valid client-provided ID is echoed;
+otherwise the server assigns a bounded process-local ID. HTTP failures are
+logged with that ID and request metadata. Tile handlers use a bounded admission
+semaphore (`TileConcurrency`, default 2); saturation returns
+`503 capacity_unavailable` with `Retry-After: 1`. The metrics endpoint exposes
+only fixed-cardinality counters for total, catalog, tile, 4xx, 5xx, and
+capacity-rejection requests, plus catalog readiness. Complete tile responses
+set a `30s` write deadline by default, configurable through `WriteTimeout`.
+Shutdown rejects new requests, waits for accepted handlers to finish, and
+returns the caller's deadline error if draining does not complete in time.
 
 A size error includes the cell, resolution, `max_tile_bytes`, the failed limit
 (`compressed_bytes` or `rows`), and `suggested_resolution = resolution + 1`.

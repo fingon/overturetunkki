@@ -3,7 +3,8 @@
 Go 1.27 service, built with ko, serving zstd-compressed GeoParquet POI tiles by
 H3 cell from Overture's S3 catalog through DuckDB. The design includes catalog
 version checks, configurable output fields and tile limits, finer-cell retry
-guidance, and a bounded disk LRU cache. A Go CLI testing client will inspect
+guidance, bounded HTTP admission with request IDs and write deadlines, and a
+bounded disk LRU cache. A Go CLI testing client will inspect
 catalog versions, download tiles, and exercise API error handling.
 
 **Status:** native DuckDB/H3 build, ko image, exact H3 UDF, conservative bbox
@@ -12,7 +13,9 @@ runtime/output validation, GeoParquet 1.1 writer compatibility, typed
 supervisor/worker configuration, deadline-bound STAC catalog validation and
 observation, cache ownership/admission/persistence and bounded scratch/
 negative-cache primitives, and the tested HTTP endpoint contract are
-implemented; service wiring and client implementation are in progress.
+implemented; HTTP request IDs, bounded metrics, backpressure, write deadlines,
+and graceful shutdown are also covered. Service wiring and client implementation
+are in progress.
 
 The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses
