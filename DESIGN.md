@@ -276,7 +276,7 @@ by Overture `id`. The API uses direct point membership at each resolution, not
 parent membership derived from resolution 15.
 
 `--fields` selects top-level source columns in a canonical order. Default to
-`id,geometry,names,categories`; require `id` and `geometry` in every projection.
+`id,geometry,names,basic_category`; require `id` and `geometry` in every projection.
 Reject missing required fields, duplicates, unknown columns, and SQL expressions
 at startup and on schema change. Retain nested structures as typed columns;
 nested-path projections are deferred. Geometry, bbox, and coordinates needed
