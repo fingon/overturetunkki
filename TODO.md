@@ -1,11 +1,12 @@
 # Implementation backlog
 
-The repository currently contains a design only. All items below are pending;
+The repository contains the design and the completed native dependency build
+gate. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
 
-- [ ] Pin Go 1.27, ko, DuckDB Go/core, and H3 versions. Prototype a Linux native
+- [x] Pin Go 1.27, ko, DuckDB Go/core, and H3 versions. Prototype a Linux native
   CGO build and ko image with required shared libraries and bundled extensions;
   verify non-root startup and no extension downloads at runtime.
 - [ ] Inspect the live STAC hierarchy and record fixtures for latest discovery,

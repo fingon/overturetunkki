@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repository_directory=$(cd -- "$script_directory/.." && pwd)
+source "$repository_directory/build/versions.env"
+
+target_architecture=${1:-$(go env GOARCH)}
+case "$target_architecture" in
+amd64)
+	duckdb_platform=linux_amd64
+	httpfs_checksum=$HTTPFS_EXTENSION_AMD64_GZ_SHA256
+	spatial_checksum=$SPATIAL_EXTENSION_AMD64_GZ_SHA256
+	;;
+arm64)
+	duckdb_platform=linux_arm64
+	httpfs_checksum=$HTTPFS_EXTENSION_ARM64_GZ_SHA256
+	spatial_checksum=$SPATIAL_EXTENSION_ARM64_GZ_SHA256
+	;;
+*)
+	echo "unsupported DuckDB extension architecture: $target_architecture" >&2
+	exit 1
+	;;
+esac
+
+output_directory="$repository_directory/cmd/native-probe/kodata/extensions/v$DUCKDB_VERSION/$duckdb_platform"
+mkdir -p "$output_directory"
+temporary_directory=$(mktemp -d)
+trap 'rm -rf "$temporary_directory"' EXIT
+
+download_extension() {
+	local extension_name=$1
+	local expected_checksum=$2
+	local archive_path="$temporary_directory/$extension_name.duckdb_extension.gz"
+	local output_path="$output_directory/$extension_name.duckdb_extension"
+	local url="https://extensions.duckdb.org/v$DUCKDB_VERSION/$duckdb_platform/$extension_name.duckdb_extension.gz"
+
+	curl --fail --location --proto '=https' --tlsv1.3 --retry 3 --output "$archive_path" "$url"
+	printf '%s  %s\n' "$expected_checksum" "$archive_path" | sha256sum --check --strict
+	gzip --decompress --stdout "$archive_path" > "$output_path.tmp"
+	mv -- "$output_path.tmp" "$output_path"
+}
+
+download_extension httpfs "$httpfs_checksum"
+download_extension spatial "$spatial_checksum"

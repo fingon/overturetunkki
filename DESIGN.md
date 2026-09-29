@@ -2,12 +2,25 @@
 
 ## Status and scope
 
-This document specifies a planned implementation; no server exists yet. Build a
-Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3 using
-DuckDB, return POIs for an H3 cell, and retain successful tiles in a bounded disk
-LRU. The initial dataset is `theme=places/type=place`; other themes, historical
-release serving, arbitrary SQL, and distributed cache coordination are out of
-scope. Implementation work and feasibility gates are in [TODO.md](TODO.md).
+This document specifies the implementation. The native dependency and image
+build gate is implemented; the HTTP service and CLI remain under construction.
+Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
+using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
+bounded disk LRU. The initial dataset is `theme=places/type=place`; other
+themes, historical release serving, arbitrary SQL, and distributed cache
+coordination are out of scope. Remaining implementation work and feasibility
+gates are in [TODO.md](TODO.md).
+
+The native probe in `cmd/native-probe` is the first executable artifact. It
+links the pinned DuckDB and H3 libraries, loads the pinned `httpfs` and
+`spatial` extensions from ko static assets, and refuses DuckDB's automatic
+extension installation and loading. The extension fetch script verifies
+architecture-specific SHA-256 checksums before producing the versioned
+DuckDB extension layout. The ko runtime is the digest-pinned
+`cgr.dev/chainguard/glibc-dynamic` image, which supplies glibc, libstdc++, CA
+certificates, and a non-root user. The native Linux arm64 prototype was built
+and executed with no network and a read-only filesystem; amd64 remains the
+required CI image gate.
 
 ## Architecture
 
@@ -300,6 +313,11 @@ TTL, keyed identically. Do not cache transient upstream/storage failures as size
 errors. Catalog freshness checks still precede negative hits.
 
 ## Configuration and deployment
+
+The dependency build pins are recorded in `build/versions.env`: Go 1.27.1,
+ko 0.19.1, DuckDB 1.5.5 through duckdb-go v2.10505.0, and H3 Go v4.5.0.
+The runtime image and DuckDB extension archives are pinned by digest/checksum;
+the probe never installs extensions or downloads them at runtime.
 
 Proposed defaults are starting points to validate with representative POIs.
 All flags have `OVERTURE_`-prefixed environment equivalents.
