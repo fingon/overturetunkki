@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -52,6 +53,7 @@ func newCatalogFixtureServer(t *testing.T) *catalogFixtureServer {
 		fixture.bodies[fmt.Sprintf("/%s/places/place/%s/%s.json", fixtureRelease, partition, partition)] = fixtureFile(t, filepath.Join(fixtureRelease, "places", "place", partition+".json"))
 	}
 	fixture.server = httptest.NewTLSServer(http.HandlerFunc(fixture.serveHTTP))
+	fixture.server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	t.Cleanup(fixture.server.Close)
 	return fixture
 }
@@ -162,7 +164,10 @@ func TestRefreshSTACFixture(t *testing.T) {
 		return
 	}
 
-	first, err := manager.Refresh(context.Background())
+	observations := make([]Observation, 0, 2)
+	first, err := manager.RefreshObserved(context.Background(), func(observation Observation) {
+		observations = append(observations, observation)
+	})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -178,6 +183,9 @@ func TestRefreshSTACFixture(t *testing.T) {
 	assert.Equal(t, first.Schema.Columns[0].Name, "id")
 	assert.Assert(t, strings.HasPrefix(first.CatalogVersion, fixtureRelease+"+sha256:"))
 	assert.Assert(t, strings.HasPrefix(first.ProjectionID, "sha256:"))
+	assert.Equal(t, len(observations), 2)
+	assert.Equal(t, observations[0], Observation{Release: fixtureRelease})
+	assert.Equal(t, observations[1], Observation{Release: fixtureRelease, CatalogVersion: first.CatalogVersion})
 
 	second, err := manager.Refresh(context.Background())
 	assert.NilError(t, err)

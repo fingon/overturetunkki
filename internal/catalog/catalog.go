@@ -209,6 +209,14 @@ func New(options Options) (*Manager, error) {
 }
 
 func (m *Manager) Refresh(ctx context.Context) (Snapshot, error) {
+	return m.refreshWithObservation(ctx, nil)
+}
+
+func (m *Manager) RefreshObserved(ctx context.Context, onObserved func(Observation)) (Snapshot, error) {
+	return m.refreshWithObservation(ctx, onObserved)
+}
+
+func (m *Manager) refreshWithObservation(ctx context.Context, onObserved func(Observation)) (Snapshot, error) {
 	if ctx == nil {
 		return Snapshot{}, fmt.Errorf("catalog refresh context is nil")
 	}
@@ -223,14 +231,14 @@ func (m *Manager) Refresh(ctx context.Context) (Snapshot, error) {
 	case <-refreshContext.Done():
 		return Snapshot{}, fmt.Errorf("catalog refresh serialization: %w", refreshContext.Err())
 	}
-	snapshot, err := m.refresh(refreshContext)
+	snapshot, err := m.refresh(refreshContext, onObserved)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("refresh catalog: %w", err)
 	}
 	return snapshot, nil
 }
 
-func (m *Manager) refresh(ctx context.Context) (Snapshot, error) {
+func (m *Manager) refresh(ctx context.Context, onObserved func(Observation)) (Snapshot, error) {
 	rootBytes, err := m.fetchJSON(ctx, m.rootURL)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("fetch root catalog: %w", err)
@@ -244,6 +252,9 @@ func (m *Manager) refresh(ctx context.Context) (Snapshot, error) {
 	}
 	if err := validateReleaseName(root.Latest); err != nil {
 		return Snapshot{}, fmt.Errorf("root catalog latest release: %w", err)
+	}
+	if onObserved != nil {
+		onObserved(Observation{Release: root.Latest})
 	}
 	releaseURL, err := m.findReleaseURL(root.Links, root.Latest)
 	if err != nil {
@@ -310,13 +321,17 @@ func (m *Manager) refresh(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("hash catalog manifest: %w", err)
 	}
+	catalogVersion := root.Latest + "+" + catalogVersionHash
+	if onObserved != nil {
+		onObserved(Observation{Release: root.Latest, CatalogVersion: catalogVersion})
+	}
 	projectionID, err := projectionID(m.options.Fields, schema)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("hash projection: %w", err)
 	}
 	return Snapshot{
 		Release:        root.Latest,
-		CatalogVersion: root.Latest + "+" + catalogVersionHash,
+		CatalogVersion: catalogVersion,
 		ProjectionID:   projectionID,
 		CollectionID:   m.options.CollectionID,
 		Manifest:       manifest,

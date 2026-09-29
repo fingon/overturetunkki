@@ -2,8 +2,8 @@
 
 The repository contains the design and the completed native dependency build,
 H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
-command configuration, CI build gates, and catalog validation. Remaining items
-below are pending;
+command configuration, CI build gates, catalog validation, and catalog
+observation. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -40,7 +40,7 @@ below are pending;
 
 - [x] Implement deadline-bound latest/manifest revalidation, trusted URL checks,
   conditional requests, canonical version/projection hashes, and schema checks.
-- [ ] Implement serialized observations, overlapping-check coalescing, idle
+- [x] Implement serialized observations, overlapping-check coalescing, idle
   polling, startup readiness, generation fencing before replacement validation,
   cancellation of old jobs, and fail-closed behavior on check failures.
 - [ ] Test rollover on cache hits, during build and before headers; unavailable

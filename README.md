@@ -8,8 +8,8 @@ catalog versions, download tiles, and exercise API error handling.
 
 **Status:** native DuckDB/H3 build, ko image, exact H3 UDF, conservative bbox
 pruning, worker output limits, GeoParquet 1.1 writer compatibility, typed
-supervisor/worker configuration, and deadline-bound STAC catalog validation
-are implemented; server and client implementation are in progress.
+supervisor/worker configuration, and deadline-bound STAC catalog validation and
+observation are implemented; server and client implementation are in progress.
 
 The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/mstenber/overturetunkki/internal/catalog"
 	"github.com/mstenber/overturetunkki/internal/config"
 )
 
@@ -31,7 +32,19 @@ func Run(ctx context.Context, cfg config.Config) error {
 
 func runSupervisor(ctx context.Context, cfg config.Config) error {
 	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount)
-	return waitForShutdown(ctx, config.ModeSupervisor)
+	manager, err := catalog.New(catalog.Options{
+		CatalogURL: cfg.CatalogURL,
+		Fields:     cfg.Fields,
+		Timeout:    cfg.CatalogTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("create catalog manager: %w", err)
+	}
+	observer, err := catalog.NewObserver(manager, cfg.CatalogPollInterval)
+	if err != nil {
+		return fmt.Errorf("create catalog observer: %w", err)
+	}
+	return observer.Run(ctx)
 }
 
 func runWorker(ctx context.Context, cfg config.Config) error {

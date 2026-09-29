@@ -4,8 +4,8 @@
 
 This document specifies the implementation. The native dependency, image build,
 H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
-command configuration, and catalog validation gates are implemented; the HTTP
-service and CLI remain under construction.
+command configuration, catalog validation, and catalog observation gates are
+implemented; the HTTP service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -93,6 +93,14 @@ keys, contract-ordered arrays, and a trailing LF before SHA-256 hashing. The
 catalog hash includes the release, selected asset provider, sorted manifest,
 and validated schema; the projection hash includes ordered selected columns,
 their resolved metadata, H3 semantics, and the GeoParquet writer revision.
+
+`catalog.Observer` serializes state publication and coalesces overlapping
+refresh callers onto one check; caller cancellation only detaches that caller.
+It performs an immediate startup check and continues bounded idle polling while
+exposing readiness and the current generation. A newly observed release or
+manifest fences the prior generation before replacement validation, canceling
+its generation context. Any failed check also clears readiness and cancels the
+active generation, so callers cannot fall back to a stale snapshot.
 
 Freshness is fail closed and checked on every tile request, including cache
 hits, negative hits, conditional requests, and range requests. Fetch the latest
@@ -394,10 +402,10 @@ The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
 `cmd/overturetunkki` now provides the supervisor and worker process modes. The
-supervisor mode is the default; both modes use the same typed configuration and
-remain signal-cancellable while their catalog, HTTP, and DuckDB job loops are
-added. All flags have `OVERTURE_`-prefixed environment equivalents, and `-v`
-sets the default `slog` level to debug.
+supervisor mode is the default and starts the serialized catalog observer; both
+modes use the same typed configuration and remain signal-cancellable while
+their HTTP and DuckDB job loops are added. All flags have `OVERTURE_`-prefixed
+environment equivalents, and `-v` sets the default `slog` level to debug.
 
 These defaults are starting points to validate with representative POIs.
 
