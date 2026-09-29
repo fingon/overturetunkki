@@ -453,7 +453,8 @@ errors. Catalog freshness checks still precede negative hits.
 
 The dependency build pins are recorded in `build/versions.env`: Go 1.27.1,
 ko 0.19.1, prek 0.5.4, DuckDB 1.5.5 through duckdb-go v2.10505.0, and H3
-Go v4.5.0.
+Go v4.5.0. The pre-commit configuration pins golangci-lint v2.13.2 and uses
+its configuration for formatting and linting.
 The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
@@ -505,15 +506,18 @@ Avoid H3 cells or release IDs as unbounded metric labels.
 
 The `Makefile` exposes `lint`, `test`, `build`, `build-linux`, `image`,
 `service-image`, `container-test`, `smoke`, and `hooks` targets. `lint` runs
-`prek run --all-files`, including the pinned standard hooks, `gofmt`, and
-`go vet`; tests remain a separate target. `build-linux` uses the pinned Go
+`prek run --all-files`, including the pinned standard hooks and full
+golangci-lint configuration verification and linting; tests remain a separate
+target. `build-linux` uses the pinned Go
 container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
 `build/tools/go.mod`, isolated from application dependencies; Podman runs it
 in Linux and loads its image tarballs. No Docker daemon is required.
 On macOS, build/test/vet select the CGO H3 client; the service remains Linux-only.
 GitHub Actions tests both host architectures on Linux and macOS and gates
-Linux images with smoke and lifecycle tests. `image` and `smoke` exercise the
-bundled native dependency probe. `service-image` packages the same bundled
+Linux images with smoke and lifecycle tests. Successful pushes to the default
+branch build native amd64 and arm64 service images and publish their manifest
+as `ghcr.io/fingon/overturetunkki/service:latest`. `image` and `smoke`
+exercise the bundled native dependency probe. `service-image` packages the same bundled
 extensions with the HTTP service. `container-test` is opt-in and runs a local
 TLS STAC/asset fixture against the service image with a read-only root,
 writable bounded cache volume, concurrent requests, conditional responses,

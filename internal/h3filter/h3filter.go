@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/uber/h3-go/v4"
@@ -344,14 +345,7 @@ func cellFromUint64(value uint64) (h3.Cell, error) {
 }
 
 func joinPredicates(predicates []string) string {
-	if len(predicates) == 1 {
-		return predicates[0]
-	}
-	joined := predicates[0]
-	for _, predicate := range predicates[1:] {
-		joined += " OR " + predicate
-	}
-	return joined
+	return strings.Join(predicates, " OR ")
 }
 
 func normalizeLongitude(longitudeDeg float64) float64 {

@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/geoparquet"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/geoparquet"
 )
 
 var (
@@ -39,6 +39,15 @@ type TileResult struct {
 	Digest    string
 }
 
+type RuntimeTileRequest struct {
+	Conn       *sql.Conn
+	Plan       QueryPlan
+	Snapshot   catalog.Snapshot
+	MaxRows    int64
+	OutputPath string
+	Settings   RuntimeSettings
+}
+
 func (settings RuntimeSettings) Validate() error {
 	values := []struct {
 		name  string
@@ -58,7 +67,7 @@ func (settings RuntimeSettings) Validate() error {
 		return fmt.Errorf("worker tile timeout must be positive, got %s", settings.TileTimeout)
 	}
 	if settings.ScratchDirectory == "" {
-		return fmt.Errorf("worker scratch directory must not be empty")
+		return errors.New("worker scratch directory must not be empty")
 	}
 	if !filepath.IsAbs(settings.ScratchDirectory) {
 		return fmt.Errorf("worker scratch directory must be absolute, got %q", settings.ScratchDirectory)
@@ -68,10 +77,10 @@ func (settings RuntimeSettings) Validate() error {
 
 func ApplyRuntimeSettings(ctx context.Context, conn *sql.Conn, settings RuntimeSettings) error {
 	if ctx == nil {
-		return fmt.Errorf("configure DuckDB: context is nil")
+		return errors.New("configure DuckDB: context is nil")
 	}
 	if conn == nil {
-		return fmt.Errorf("configure DuckDB: connection is nil")
+		return errors.New("configure DuckDB: connection is nil")
 	}
 	if err := settings.Validate(); err != nil {
 		return fmt.Errorf("configure DuckDB: %w", err)
@@ -96,33 +105,40 @@ func ApplyRuntimeSettings(ctx context.Context, conn *sql.Conn, settings RuntimeS
 	return nil
 }
 
-func BuildTileWithSettings(ctx context.Context, conn *sql.Conn, plan QueryPlan, snapshot catalog.Snapshot, maxRows int64, outputPath string, settings RuntimeSettings) (TileResult, error) {
+func BuildTileWithSettings(ctx context.Context, request RuntimeTileRequest) (TileResult, error) {
 	if ctx == nil {
-		return TileResult{}, fmt.Errorf("build tile with settings: context is nil")
+		return TileResult{}, errors.New("build tile with settings: context is nil")
 	}
-	if err := settings.Validate(); err != nil {
+	if err := request.Settings.Validate(); err != nil {
 		return TileResult{}, err
 	}
-	tileContext, cancel := context.WithTimeout(ctx, settings.TileTimeout)
+	tileContext, cancel := context.WithTimeout(ctx, request.Settings.TileTimeout)
 	defer cancel()
-	if err := ApplyRuntimeSettings(tileContext, conn, settings); err != nil {
+	if err := ApplyRuntimeSettings(tileContext, request.Conn, request.Settings); err != nil {
 		return TileResult{}, classifyWorkerError(err)
 	}
-	copyResult, err := BuildTile(tileContext, conn, plan, snapshot, maxRows, outputPath, settings.MaxOutputBytes)
+	copyResult, err := BuildTile(tileContext, TileBuildRequest{
+		Conn:       request.Conn,
+		Plan:       request.Plan,
+		Snapshot:   request.Snapshot,
+		MaxRows:    request.MaxRows,
+		OutputPath: request.OutputPath,
+		MaxBytes:   request.Settings.MaxOutputBytes,
+	})
 	if err != nil {
 		return TileResult{}, classifyWorkerError(err)
 	}
-	expectedFields := make([]string, 0, len(plan.Columns))
-	for _, column := range plan.Columns {
+	expectedFields := make([]string, 0, len(request.Plan.Columns))
+	for _, column := range request.Plan.Columns {
 		expectedFields = append(expectedFields, column.Name)
 	}
-	validation, err := geoparquet.ValidateFile(outputPath, expectedFields, settings.MaxOutputBytes)
+	validation, err := geoparquet.ValidateFile(request.OutputPath, expectedFields, request.Settings.MaxOutputBytes)
 	if err != nil {
-		return TileResult{}, cleanupInvalidOutput(outputPath, classifyValidationError(err))
+		return TileResult{}, cleanupInvalidOutput(request.OutputPath, classifyValidationError(err))
 	}
 	if validation.SizeBytes != copyResult.SizeBytes {
 		cause := fmt.Errorf("%w: COPY reported %d bytes, validator found %d", ErrInvalidOutput, copyResult.SizeBytes, validation.SizeBytes)
-		return TileResult{}, cleanupInvalidOutput(outputPath, cause)
+		return TileResult{}, cleanupInvalidOutput(request.OutputPath, cause)
 	}
 	return TileResult{
 		SizeBytes: validation.SizeBytes,
@@ -133,21 +149,20 @@ func BuildTileWithSettings(ctx context.Context, conn *sql.Conn, plan QueryPlan, 
 
 func classifyValidationError(err error) error {
 	if errors.Is(err, geoparquet.ErrFileTooLarge) {
-		var tooLarge *geoparquet.FileTooLargeError
-		if errors.As(err, &tooLarge) {
+		if tooLarge, ok := errors.AsType[*geoparquet.FileTooLargeError](err); ok {
 			return &OutputTooLargeError{ActualBytes: tooLarge.ActualBytes, LimitBytes: tooLarge.LimitBytes}
 		}
-		return fmt.Errorf("%w: %v", ErrOutputTooLarge, err)
+		return fmt.Errorf("%w: %w", ErrOutputTooLarge, err)
 	}
 	if errors.Is(err, geoparquet.ErrInvalidGeoParquet) {
-		return fmt.Errorf("%w: %v", ErrInvalidOutput, err)
+		return fmt.Errorf("%w: %w", ErrInvalidOutput, err)
 	}
 	return err
 }
 
 func cleanupInvalidOutput(path string, cause error) error {
 	if err := RemoveOutput(path); err != nil {
-		return fmt.Errorf("%w; cleanup failed: %v", classifyWorkerError(cause), err)
+		return fmt.Errorf("%w; cleanup failed: %w", classifyWorkerError(cause), err)
 	}
 	return cause
 }
@@ -160,22 +175,22 @@ func classifyWorkerError(err error) error {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("%w: %v", ErrTileTimeout, err)
+		return fmt.Errorf("%w: %w", ErrTileTimeout, err)
 	}
 	if errors.Is(err, context.Canceled) {
-		return fmt.Errorf("%w: %v", ErrTileCanceled, err)
+		return fmt.Errorf("%w: %w", ErrTileCanceled, err)
 	}
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrInvalid) || errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EIO) {
-		return fmt.Errorf("%w: %v", ErrDiskFailure, err)
+		return fmt.Errorf("%w: %w", ErrDiskFailure, err)
 	}
 	lowerMessage := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(lowerMessage, "out of memory"), strings.Contains(lowerMessage, "memory limit"):
-		return fmt.Errorf("%w: %v", ErrOutOfMemory, err)
+		return fmt.Errorf("%w: %w", ErrOutOfMemory, err)
 	case strings.Contains(lowerMessage, "no space left"), strings.Contains(lowerMessage, "disk full"), strings.Contains(lowerMessage, "file system"):
-		return fmt.Errorf("%w: %v", ErrDiskFailure, err)
+		return fmt.Errorf("%w: %w", ErrDiskFailure, err)
 	case strings.Contains(lowerMessage, "s3"), strings.Contains(lowerMessage, "httpfs"), strings.Contains(lowerMessage, "http status"), strings.Contains(lowerMessage, "remote file"), strings.Contains(lowerMessage, "no files found"), strings.Contains(lowerMessage, "read_parquet"):
-		return fmt.Errorf("%w: %v", ErrUpstream, err)
+		return fmt.Errorf("%w: %w", ErrUpstream, err)
 	default:
 		return err
 	}

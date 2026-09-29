@@ -47,10 +47,10 @@ func (*FileTooLargeError) Unwrap() error {
 
 func ValidateFile(path string, expectedFields []string, maxBytes int64) (validation FileValidation, err error) {
 	if path == "" {
-		return FileValidation{}, fmt.Errorf("validate GeoParquet: path is empty")
+		return FileValidation{}, errors.New("validate GeoParquet: path is empty")
 	}
 	if len(expectedFields) == 0 {
-		return FileValidation{}, fmt.Errorf("validate GeoParquet: expected fields are empty")
+		return FileValidation{}, errors.New("validate GeoParquet: expected fields are empty")
 	}
 	if maxBytes <= 0 {
 		return FileValidation{}, fmt.Errorf("validate GeoParquet: byte limit must be positive, got %d", maxBytes)
@@ -68,7 +68,7 @@ func ValidateFile(path string, expectedFields []string, maxBytes int64) (validat
 
 	reader, err := file.OpenParquetFile(path, false)
 	if err != nil {
-		return FileValidation{}, fmt.Errorf("%w: open footer %q: %v", ErrInvalidGeoParquet, path, err)
+		return FileValidation{}, fmt.Errorf("%w: open footer %q: %w", ErrInvalidGeoParquet, path, err)
 	}
 	defer func() {
 		closeErr := reader.Close()
@@ -82,8 +82,9 @@ func ValidateFile(path string, expectedFields []string, maxBytes int64) (validat
 	if root.NumFields() != len(expectedFields) {
 		return FileValidation{}, invalidFile(path, "footer has %d top-level fields, want %d", root.NumFields(), len(expectedFields))
 	}
-	fields := make([]string, root.NumFields())
-	for index := 0; index < root.NumFields(); index++ {
+	fieldCount := root.NumFields()
+	fields := make([]string, fieldCount)
+	for index := range fieldCount {
 		fields[index] = root.Field(index).Name()
 		if fields[index] != expectedFields[index] {
 			return FileValidation{}, invalidFile(path, "footer field %d is %q, want %q", index, fields[index], expectedFields[index])
@@ -98,7 +99,7 @@ func ValidateFile(path string, expectedFields []string, maxBytes int64) (validat
 		return FileValidation{}, invalidFile(path, "GeoParquet metadata has version %q and primary column %q", geoMetadata.Version, geoMetadata.PrimaryColumn)
 	}
 	geometryMetadata, ok := geoMetadata.Columns[GeometryColumnName]
-	if !ok || len(geoMetadata.Columns) != 1 || geometryMetadata.Encoding != WKBEncoding || len(geometryMetadata.GeometryTypes) != 1 || geometryMetadata.GeometryTypes[0] != "Point" {
+	if !ok || len(geoMetadata.Columns) != 1 || geometryMetadata.Encoding != WKBEncoding || len(geometryMetadata.GeometryTypes) != 1 || geometryMetadata.GeometryTypes[0] != pointGeometryType {
 		return FileValidation{}, invalidFile(path, "GeoParquet geometry metadata is not a single WKB Point column")
 	}
 	geometryColumnIndex := fileMetadata.Schema.ColumnIndexByName(GeometryColumnName)
@@ -112,11 +113,11 @@ func ValidateFile(path string, expectedFields []string, maxBytes int64) (validat
 
 	arrowReader, err := pqarrow.NewFileReader(reader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
 	if err != nil {
-		return FileValidation{}, fmt.Errorf("%w: create independent reader for %q: %v", ErrInvalidGeoParquet, path, err)
+		return FileValidation{}, fmt.Errorf("%w: create independent reader for %q: %w", ErrInvalidGeoParquet, path, err)
 	}
 	table, err := arrowReader.ReadTable(context.Background())
 	if err != nil {
-		return FileValidation{}, fmt.Errorf("%w: read %q: %v", ErrInvalidGeoParquet, path, err)
+		return FileValidation{}, fmt.Errorf("%w: read %q: %w", ErrInvalidGeoParquet, path, err)
 	}
 	defer table.Release()
 	if table.NumRows() != reader.NumRows() {
@@ -161,7 +162,7 @@ func readGeoMetadata(path string, keyValueMetadata metadata.KeyValueMetadata) (G
 	}
 	var decoded GeoMetadata
 	if err := json.Unmarshal([]byte(*geoValue), &decoded); err != nil {
-		return GeoMetadata{}, fmt.Errorf("%w: decode %q metadata: %v", ErrInvalidGeoParquet, path, err)
+		return GeoMetadata{}, fmt.Errorf("%w: decode %q metadata: %w", ErrInvalidGeoParquet, path, err)
 	}
 	return decoded, nil
 }

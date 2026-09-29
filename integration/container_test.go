@@ -1,3 +1,4 @@
+//nolint:goconst,tagliatelle // Integration literals and API fixtures stay readable.
 package integration
 
 import (
@@ -29,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/geoparquet"
+	"github.com/fingon/overturetunkki/internal/geoparquet"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
@@ -104,7 +105,7 @@ func TestContainerLifecycle(t *testing.T) {
 	waitForReady(t, client, container.url("/readyz"))
 	oldCatalog := fetchCatalog(t, client, container.url("/v1/catalog"))
 	cell := testCell(t, 9)
-	tileBody, tileETag := fetchTile(t, client, container, oldCatalog.CatalogVersion, cell, http.StatusOK)
+	tileBody, tileETag := fetchTile(t, tileFetchOptions{client: client, container: container, version: oldCatalog.CatalogVersion, cell: cell, wantStatus: http.StatusOK})
 	validateTile(t, tileBody)
 
 	t.Run("CLI download and conditional response", func(t *testing.T) {
@@ -141,10 +142,8 @@ func TestContainerLifecycle(t *testing.T) {
 		errors := make(chan error, clientCount)
 		var waitGroup sync.WaitGroup
 		for range clientCount {
-			waitGroup.Add(1)
-			go func() {
-				defer waitGroup.Done()
-				response, err := getTile(client, container, oldCatalog.CatalogVersion, cell, "")
+			waitGroup.Go(func() {
+				response, err := container.getTile(client, oldCatalog.CatalogVersion, cell, "")
 				if err != nil {
 					errors <- err
 					return
@@ -160,7 +159,7 @@ func TestContainerLifecycle(t *testing.T) {
 				if err := response.Body.Close(); err != nil {
 					errors <- fmt.Errorf("close concurrent tile: %w", err)
 				}
-			}()
+			})
 		}
 		waitGroup.Wait()
 		close(errors)
@@ -170,7 +169,7 @@ func TestContainerLifecycle(t *testing.T) {
 	})
 
 	t.Run("conditional response", func(t *testing.T) {
-		response, err := getTile(client, container, oldCatalog.CatalogVersion, cell, tileETag)
+		response, err := container.getTile(client, oldCatalog.CatalogVersion, cell, tileETag)
 		assert.NilError(t, err)
 		if err != nil {
 			return
@@ -181,11 +180,11 @@ func TestContainerLifecycle(t *testing.T) {
 
 	fixture.setRelease(rolloverRelease)
 	waitForStatus(t, client, func() int {
-		response, err := getTile(client, container, oldCatalog.CatalogVersion, cell, "")
+		response, err := container.getTile(client, oldCatalog.CatalogVersion, cell, "")
 		if err != nil {
 			return 0
 		}
-		defer response.Body.Close()
+		defer func() { assert.NilError(t, response.Body.Close()) }()
 		return response.StatusCode
 	}, http.StatusConflict)
 	newCatalog := fetchCatalog(t, client, container.url("/v1/catalog"))
@@ -203,7 +202,7 @@ func TestContainerLifecycle(t *testing.T) {
 		_, statErr := os.Stat(outputPath)
 		assert.Assert(t, os.IsNotExist(statErr))
 	})
-	newBody, _ := fetchTile(t, client, container, newCatalog.CatalogVersion, cell, http.StatusOK)
+	newBody, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: cell, wantStatus: http.StatusOK})
 	validateTile(t, newBody)
 
 	fixture.setMode(fixtureCatalogDown)
@@ -212,7 +211,7 @@ func TestContainerLifecycle(t *testing.T) {
 		if err != nil {
 			return 0
 		}
-		defer response.Body.Close()
+		defer func() { assert.NilError(t, response.Body.Close()) }()
 		return response.StatusCode
 	}, http.StatusServiceUnavailable)
 	waitForStatus(t, client, func() int {
@@ -220,42 +219,44 @@ func TestContainerLifecycle(t *testing.T) {
 		if err != nil {
 			return 0
 		}
-		defer response.Body.Close()
+		defer func() { assert.NilError(t, response.Body.Close()) }()
 		return response.StatusCode
 	}, http.StatusServiceUnavailable)
 	fixture.setMode(fixtureNormal)
 	waitForReady(t, client, container.url("/readyz"))
 	fixture.setMode(fixtureAssetDown)
 	assetFailureCell := testCell(t, 7)
-	fetchTile(t, client, container, newCatalog.CatalogVersion, assetFailureCell, http.StatusServiceUnavailable)
+	fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: assetFailureCell, wantStatus: http.StatusServiceUnavailable})
 	fixture.setMode(fixtureNormal)
 
 	if runtime.GOOS == "linux" {
 		t.Run("worker death and replacement", func(t *testing.T) {
 			fixture.setAssetDelay(5 * time.Second)
 			uncachedCell := testCell(t, 8)
-			responseDone := make(chan *http.Response, 1)
+			responseDone := make(chan int, 1)
 			go func() {
-				response, err := getTile(client, container, newCatalog.CatalogVersion, uncachedCell, "")
+				response, err := container.getTile(client, newCatalog.CatalogVersion, uncachedCell, "")
 				if err != nil {
-					responseDone <- nil
+					responseDone <- 0
 					return
 				}
-				responseDone <- response
+				status := response.StatusCode
+				if err := response.Body.Close(); err != nil {
+					responseDone <- 0
+					return
+				}
+				responseDone <- status
 			}()
 			workerPID := waitForWorkerPID(t, container.name)
 			assert.NilError(t, killProcess(workerPID))
 			select {
-			case response := <-responseDone:
-				if response != nil {
-					assert.Assert(t, response.StatusCode >= http.StatusInternalServerError)
-					assert.NilError(t, response.Body.Close())
-				}
+			case status := <-responseDone:
+				assert.Assert(t, status >= http.StatusInternalServerError)
 			case <-time.After(10 * time.Second):
 				t.Fatal("worker death did not finish the tile request")
 			}
 			fixture.setAssetDelay(0)
-			body, _ := fetchTile(t, client, container, newCatalog.CatalogVersion, uncachedCell, http.StatusOK)
+			body, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: uncachedCell, wantStatus: http.StatusOK})
 			validateTile(t, body)
 		})
 	} else {
@@ -267,7 +268,7 @@ func TestContainerLifecycle(t *testing.T) {
 	t.Cleanup(container.remove)
 	container.start()
 	waitForReady(t, client, container.url("/readyz"))
-	restartedBody, _ := fetchTile(t, client, container, newCatalog.CatalogVersion, cell, http.StatusOK)
+	restartedBody, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: cell, wantStatus: http.StatusOK})
 	validateTile(t, restartedBody)
 }
 
@@ -371,7 +372,14 @@ func newFixtureServer(t *testing.T) *fixtureServer {
 	if err != nil {
 		t.Fatalf("listen for fixture server: %v", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Fatalf("fixture listener has unexpected address type and close failed: %v", closeErr)
+		}
+		t.Fatal("fixture listener has unexpected address type")
+	}
+	port := tcpAddress.Port
 	fixture := &fixtureServer{
 		t:          t,
 		listener:   listener,
@@ -382,7 +390,9 @@ func newFixtureServer(t *testing.T) *fixtureServer {
 	}
 	keyPair, err := tlsKeyPair(certificate, key)
 	if err != nil {
-		listener.Close()
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Fatalf("close fixture listener after TLS setup failure: %v", closeErr)
+		}
 		t.Fatalf("create fixture TLS key pair: %v", err)
 	}
 	fixture.server = &http.Server{Handler: http.HandlerFunc(fixture.serveHTTP)}
@@ -456,9 +466,7 @@ func (fixture *fixtureServer) serveHTTP(responseWriter http.ResponseWriter, requ
 
 func (fixture *fixtureServer) document(requestPath, release string) ([]byte, error) {
 	fixturePath := requestPath
-	if requestPath == "/catalog.json" {
-		fixturePath = "/catalog.json"
-	} else {
+	if requestPath != "/catalog.json" {
 		fixturePath = strings.Replace(requestPath, "/"+release+"/", "/"+fixtureRelease+"/", 1)
 	}
 	baseName := filepath.Base(fixturePath)
@@ -508,30 +516,38 @@ func fetchCatalog(t *testing.T, client *http.Client, endpoint string) wireCatalo
 	if err != nil {
 		return wireCatalog{}
 	}
-	defer response.Body.Close()
+	defer func() { assert.NilError(t, response.Body.Close()) }()
 	assert.Equal(t, response.StatusCode, http.StatusOK)
 	var result wireCatalog
 	assert.NilError(t, json.NewDecoder(response.Body).Decode(&result))
 	return result
 }
 
-func fetchTile(t *testing.T, client *http.Client, container *serviceContainer, version string, cell h3.Cell, wantStatus int) ([]byte, string) {
+type tileFetchOptions struct {
+	client     *http.Client
+	container  *serviceContainer
+	version    string
+	cell       h3.Cell
+	wantStatus int
+}
+
+func fetchTile(t *testing.T, options tileFetchOptions) ([]byte, string) {
 	t.Helper()
-	response, err := getTile(client, container, version, cell, "")
+	response, err := options.container.getTile(options.client, options.version, options.cell, "")
 	assert.NilError(t, err)
 	if err != nil {
 		return nil, ""
 	}
-	defer response.Body.Close()
-	if response.StatusCode != wantStatus {
-		t.Fatalf("tile status %d, want %d; logs:\n%s", response.StatusCode, wantStatus, podmanLogs(t, container.name))
+	defer func() { assert.NilError(t, response.Body.Close()) }()
+	if response.StatusCode != options.wantStatus {
+		t.Fatalf("tile status %d, want %d; logs:\n%s", response.StatusCode, options.wantStatus, podmanLogs(t, options.container.name))
 	}
 	body, err := io.ReadAll(response.Body)
 	assert.NilError(t, err)
 	return body, response.Header.Get("ETag")
 }
 
-func getTile(client *http.Client, container *serviceContainer, version string, cell h3.Cell, etag string) (*http.Response, error) {
+func (container *serviceContainer) getTile(client *http.Client, version string, cell h3.Cell, etag string) (*http.Response, error) {
 	query := url.Values{"catalog_version": []string{version}}
 	request, err := http.NewRequest(http.MethodGet, container.url("/v1/tiles/places/"+cell.String()+"?"+query.Encode()), nil)
 	if err != nil {
@@ -573,7 +589,9 @@ func waitForReady(t *testing.T, client *http.Client, endpoint string) {
 		response, err := client.Get(endpoint)
 		if err == nil {
 			status := response.StatusCode
-			response.Body.Close()
+			if closeErr := response.Body.Close(); closeErr != nil {
+				t.Errorf("close readiness response: %v", closeErr)
+			}
 			if status == http.StatusOK {
 				return
 			}
@@ -583,7 +601,7 @@ func waitForReady(t *testing.T, client *http.Client, endpoint string) {
 	t.Fatalf("service did not become ready; logs:\n%s", podmanLogs(t, containerName))
 }
 
-func waitForStatus(t *testing.T, client *http.Client, status func() int, want int) {
+func waitForStatus(t *testing.T, _ *http.Client, status func() int, want int) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -601,7 +619,7 @@ func waitForWorkerPID(t *testing.T, name string) int {
 	for time.Now().Before(deadline) {
 		output, err := commandOutput(containerCommand, "top", name, "hpid", "args")
 		if err == nil {
-			for _, line := range strings.Split(output, "\n") {
+			for line := range strings.SplitSeq(output, "\n") {
 				if !strings.Contains(line, "--mode=worker") {
 					continue
 				}
@@ -621,10 +639,10 @@ func waitForWorkerPID(t *testing.T, name string) int {
 	return 0
 }
 
-func testCell(t testing.TB, resolution int) h3.Cell {
-	t.Helper()
+func testCell(tb testing.TB, resolution int) h3.Cell {
+	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), resolution)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	return cell
 }
 

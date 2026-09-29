@@ -61,7 +61,7 @@ func TestCopyOutputLimitSubprocess(t *testing.T) {
 
 	t.Run("spill is not an output escape hatch", func(t *testing.T) {
 		outputPath := t.TempDir() + "/spill.parquet"
-		err, output := runCopyChild(t, spillCopyMode, outputPath, 0)
+		output, err := runCopyChild(t, spillCopyMode, outputPath, 0)
 		assert.Assert(t, err != nil)
 		assert.Assert(t, strings.Contains(output, "spill disabled query failed"), output)
 		assert.NilError(t, RemoveOutput(outputPath))
@@ -128,17 +128,23 @@ func TestCopyLimitSubprocess(t *testing.T) {
 	switch mode {
 	case standardCopyMode, hugeRowCopyMode:
 		if err := runCopyWorkload(mode, outputPath); err != nil {
-			fmt.Fprintf(os.Stderr, "copy failed: %v\n", err)
+			if _, writeErr := fmt.Fprintf(os.Stderr, "copy failed: %v\n", err); writeErr != nil {
+				os.Exit(copyHelperFailureExit)
+			}
 			os.Exit(copyHelperFailureExit)
 		}
 	case spillCopyMode:
-		if err := runSpillWorkload(outputPath); err == nil {
-			fmt.Fprintln(os.Stderr, "spill disabled query unexpectedly succeeded")
-			os.Exit(copyHelperSpillExit)
-		} else {
-			fmt.Fprintf(os.Stderr, "spill disabled query failed: %v\n", err)
+		err := runSpillWorkload(outputPath)
+		if err == nil {
+			if _, writeErr := fmt.Fprintln(os.Stderr, "spill disabled query unexpectedly succeeded"); writeErr != nil {
+				os.Exit(copyHelperSpillExit)
+			}
 			os.Exit(copyHelperSpillExit)
 		}
+		if _, writeErr := fmt.Fprintf(os.Stderr, "spill disabled query failed: %v\n", err); writeErr != nil {
+			os.Exit(copyHelperSpillExit)
+		}
+		os.Exit(copyHelperSpillExit)
 	default:
 		t.Fatalf("unknown copy helper mode %q", mode)
 	}
@@ -147,7 +153,7 @@ func TestCopyLimitSubprocess(t *testing.T) {
 func testCopyLimitScenario(t *testing.T, mode string, failureLimitBytes int64) {
 	t.Helper()
 	probePath := t.TempDir() + "/probe.parquet"
-	err, output := runCopyChild(t, mode, probePath, 0)
+	output, err := runCopyChild(t, mode, probePath, 0)
 	assert.NilError(t, err, output)
 	if err != nil {
 		return
@@ -161,7 +167,7 @@ func testCopyLimitScenario(t *testing.T, mode string, failureLimitBytes int64) {
 	assert.NilError(t, RemoveOutput(probePath))
 
 	exactPath := t.TempDir() + "/exact.parquet"
-	err, output = runCopyChild(t, mode, exactPath, probeInfo.Size())
+	output, err = runCopyChild(t, mode, exactPath, probeInfo.Size())
 	assert.NilError(t, err, output)
 	if err == nil {
 		exactInfo, statErr := os.Stat(exactPath)
@@ -177,7 +183,7 @@ func testCopyLimitScenario(t *testing.T, mode string, failureLimitBytes int64) {
 	if failureLimitBytes > 0 {
 		limitBytes = failureLimitBytes
 	}
-	err, output = runCopyChild(t, mode, failurePath, limitBytes)
+	output, err = runCopyChild(t, mode, failurePath, limitBytes)
 	assert.Assert(t, err != nil, output)
 	assert.Assert(t, expectedFileSizeFailure(err, output), output)
 	if info, statErr := os.Stat(failurePath); statErr == nil {
@@ -188,8 +194,8 @@ func testCopyLimitScenario(t *testing.T, mode string, failureLimitBytes int64) {
 	assert.NilError(t, RemoveOutput(failurePath))
 }
 
-func runCopyChild(t testing.TB, mode, outputPath string, maxBytes int64) (error, string) {
-	t.Helper()
+func runCopyChild(tb testing.TB, mode, outputPath string, maxBytes int64) (string, error) {
+	tb.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestCopyLimitSubprocess$", "--")
 	command.Env = append(os.Environ(),
 		copyHelperEnv+"=1",
@@ -201,22 +207,38 @@ func runCopyChild(t testing.TB, mode, outputPath string, maxBytes int64) (error,
 	command.Stdout = &output
 	command.Stderr = &output
 	err := command.Run()
-	return err, output.String()
+	return output.String(), err
 }
 
-func runCopyWorkload(mode, outputPath string) error {
+func runCopyWorkload(mode, outputPath string) (runErr error) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return fmt.Errorf("open DuckDB: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("close DuckDB: %w", closeErr)
+			} else {
+				runErr = fmt.Errorf("%w; close DuckDB: %w", runErr, closeErr)
+			}
+		}
+	}()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	connection, err := db.Conn(context.Background())
 	if err != nil {
 		return fmt.Errorf("get DuckDB connection: %w", err)
 	}
-	defer func() { _ = connection.Close() }()
+	defer func() {
+		if closeErr := connection.Close(); closeErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("close DuckDB connection: %w", closeErr)
+			} else {
+				runErr = fmt.Errorf("%w; close DuckDB connection: %w", runErr, closeErr)
+			}
+		}
+	}()
 
 	selectSQL, err := createCopySource(context.Background(), connection, mode)
 	if err != nil {
@@ -236,23 +258,39 @@ func runCopyWorkload(mode, outputPath string) error {
 		}
 		return nil
 	}
-	_, err = CopyWithOutputLimit(context.Background(), connection, copySQL, outputPath, maxBytes)
+	_, err = CopyWithOutputLimit(context.Background(), CopyRequest{Conn: connection, Query: copySQL, OutputPath: outputPath, MaxBytes: maxBytes})
 	return err
 }
 
-func runSpillWorkload(outputPath string) error {
+func runSpillWorkload(outputPath string) (runErr error) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return fmt.Errorf("open DuckDB: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("close DuckDB: %w", closeErr)
+			} else {
+				runErr = fmt.Errorf("%w; close DuckDB: %w", runErr, closeErr)
+			}
+		}
+	}()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	connection, err := db.Conn(context.Background())
 	if err != nil {
 		return fmt.Errorf("get DuckDB connection: %w", err)
 	}
-	defer func() { _ = connection.Close() }()
+	defer func() {
+		if closeErr := connection.Close(); closeErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("close DuckDB connection: %w", closeErr)
+			} else {
+				runErr = fmt.Errorf("%w; close DuckDB connection: %w", runErr, closeErr)
+			}
+		}
+	}()
 	if err := DisableCopySpill(context.Background(), connection); err != nil {
 		return err
 	}
@@ -313,25 +351,25 @@ func expectedFileSizeFailure(err error, output string) bool {
 	if !errors.As(err, &exitError) {
 		return false
 	}
-	waitStatus, ok := exitError.ProcessState.Sys().(syscall.WaitStatus)
+	waitStatus, ok := exitError.Sys().(syscall.WaitStatus)
 	return ok && waitStatus.Signaled() && waitStatus.Signal() == syscall.SIGXFSZ
 }
 
-func openDuckDBConnection(t testing.TB) *sql.Conn {
-	t.Helper()
+func openDuckDBConnection(tb testing.TB) *sql.Conn {
+	tb.Helper()
 	db, err := sql.Open("duckdb", "")
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	t.Cleanup(func() { assert.NilError(t, db.Close()) })
+	tb.Cleanup(func() { assert.NilError(tb, db.Close()) })
 	connection, err := db.Conn(context.Background())
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
-	t.Cleanup(func() { assert.NilError(t, connection.Close()) })
+	tb.Cleanup(func() { assert.NilError(tb, connection.Close()) })
 	return connection
 }

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/config"
+	"github.com/fingon/overturetunkki/internal/config"
 	"gotest.tools/v3/assert"
 )
 

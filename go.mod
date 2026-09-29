@@ -1,4 +1,4 @@
-module github.com/mstenber/overturetunkki
+module github.com/fingon/overturetunkki
 
 go 1.27.0
 

@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package client
 
 import (
@@ -20,7 +21,7 @@ import (
 func TestDownloadTileResponsePublishesValidatedParquet(t *testing.T) {
 	body := []byte("PAR1tilePAR1")
 	destination := filepath.Join(t.TempDir(), "tile.parquet")
-	response := testDownloadResponse(body)
+	response := testDownloadResponse(body) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
 	response.ContentLength = -1
 
 	result, err := DownloadTileResponse(context.Background(), response, testDownloadOptions(destination))
@@ -62,7 +63,8 @@ func TestDownloadTileResponseRefusesOverwriteWithoutForce(t *testing.T) {
 	original := []byte("existing tile")
 	assert.NilError(t, os.WriteFile(destination, original, 0o600))
 
-	result, err := DownloadTileResponse(context.Background(), testDownloadResponse([]byte("PAR1tilePAR1")), testDownloadOptions(destination))
+	response := testDownloadResponse([]byte("PAR1tilePAR1")) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
+	result, err := DownloadTileResponse(context.Background(), response, testDownloadOptions(destination))
 	assert.Assert(t, result == (DownloadResult{}))
 	assert.ErrorContains(t, err, "already exists")
 	actual, readErr := os.ReadFile(destination)
@@ -78,7 +80,8 @@ func TestDownloadTileResponseForceReplacesDestination(t *testing.T) {
 	options.Force = true
 	body := []byte("PAR1new tilePAR1")
 
-	_, err := DownloadTileResponse(context.Background(), testDownloadResponse(body), options)
+	response := testDownloadResponse(body) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
+	_, err := DownloadTileResponse(context.Background(), response, options)
 	assert.NilError(t, err)
 	actual, err := os.ReadFile(destination)
 	assert.NilError(t, err)
@@ -106,7 +109,7 @@ func TestDownloadTileResponseValidatesHeaders(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(t.TempDir(), "tile.parquet")
-			response := testDownloadResponse([]byte("PAR1tilePAR1"))
+			response := testDownloadResponse([]byte("PAR1tilePAR1")) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
 			test.change(response)
 			_, err := DownloadTileResponse(context.Background(), response, testDownloadOptions(destination))
 			assert.ErrorContains(t, err, test.want)
@@ -132,7 +135,7 @@ func TestDownloadTileResponseValidatesLengthDigestAndMagic(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(t.TempDir(), "tile.parquet")
-			response := testDownloadResponse(test.body)
+			response := testDownloadResponse(test.body) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
 			if test.change != nil {
 				test.change(response)
 			}
@@ -152,7 +155,8 @@ func TestDownloadTileResponseCancellationCleansTemporaryFile(t *testing.T) {
 	cancel()
 	destination := filepath.Join(t.TempDir(), "tile.parquet")
 
-	_, err := DownloadTileResponse(ctx, testDownloadResponse([]byte("PAR1tilePAR1")), testDownloadOptions(destination))
+	response := testDownloadResponse([]byte("PAR1tilePAR1")) //nolint:bodyclose // DownloadTileResponse consumes and closes the response body.
+	_, err := DownloadTileResponse(ctx, response, testDownloadOptions(destination))
 	assert.ErrorContains(t, err, "context canceled")
 	assertNoPartialTile(t, destination)
 	_, statErr := os.Stat(destination)

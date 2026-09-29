@@ -190,6 +190,9 @@ Podman emulation support. GitHub Actions checks Linux amd64/arm64 and macOS
 Intel/Apple Silicon clients, and runs Linux image smoke and lifecycle tests.
 The service remains Linux-only; native macOS service builds are unsupported.
 
+Successful pushes to `main` publish the service as a multi-platform image at
+`ghcr.io/fingon/overturetunkki/service:latest` for Linux amd64 and arm64.
+
 Install repository hooks with `make hooks`. See [DESIGN.md](DESIGN.md) for the
 architecture and HTTP contract, and [TODO.md](TODO.md) for the completed
 implementation checklist.

@@ -15,16 +15,8 @@ repos:
       - id: end-of-file-fixer
       - id: mixed-line-ending
       - id: trailing-whitespace
-  - repo: local
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.13.2
     hooks:
-      - id: gofmt
-        name: gofmt
-        entry: gofmt -w
-        language: system
-        types:
-          - go
-      - id: go-vet
-        name: go vet
-        entry: make vet
-        language: system
-        pass_filenames: false
+      - id: golangci-lint-config-verify
+      - id: golangci-lint-full

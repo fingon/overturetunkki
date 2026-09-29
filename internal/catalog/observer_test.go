@@ -1,9 +1,9 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package catalog
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -70,7 +70,7 @@ func (checker *observerChecker) callCount() int {
 func observerTestSnapshot(release string) Snapshot {
 	return Snapshot{
 		Release:        release,
-		CatalogVersion: fmt.Sprintf("%s+sha256:test", release),
+		CatalogVersion: release + "+sha256:test",
 		CollectionID:   DefaultCollectionID,
 		Manifest: []Asset{{
 			PartitionID:   "00000",

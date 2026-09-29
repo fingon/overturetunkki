@@ -85,7 +85,7 @@ func (c *Cache) reconcileFiles(filesRoot string) error {
 		metadata, err := readSidecar(sidecarPath)
 		if err != nil {
 			if cleanupErr := removeCachePair(tilePath, sidecarPath); cleanupErr != nil {
-				return fmt.Errorf("reconcile corrupt cache entry %q: %w; cleanup: %v", tilePath, err, cleanupErr)
+				return fmt.Errorf("reconcile corrupt cache entry %q: %w; cleanup: %w", tilePath, err, cleanupErr)
 			}
 			slog.Warn("removed corrupt cache entry", "path", tilePath, "error", err)
 			continue
@@ -93,7 +93,7 @@ func (c *Cache) reconcileFiles(filesRoot string) error {
 		keyDigest, err := metadata.Key.digest()
 		if err != nil || keyDigest != digest || metadata.SizeBytes <= 0 || metadata.Digest == "" {
 			if cleanupErr := removeCachePair(tilePath, sidecarPath); cleanupErr != nil {
-				return fmt.Errorf("reconcile invalid cache metadata %q: %w; cleanup: %v", tilePath, err, cleanupErr)
+				return fmt.Errorf("reconcile invalid cache metadata %q: %w; cleanup: %w", tilePath, err, cleanupErr)
 			}
 			slog.Warn("removed invalid cache metadata", "path", tilePath, "error", err)
 			continue
@@ -101,14 +101,14 @@ func (c *Cache) reconcileFiles(filesRoot string) error {
 		fileInfo, err := os.Stat(tilePath)
 		validationErr := err
 		if validationErr == nil && !fileInfo.Mode().IsRegular() {
-			validationErr = fmt.Errorf("cache tile is not a regular file")
+			validationErr = errors.New("cache tile is not a regular file")
 		}
 		if validationErr == nil && fileInfo.Size() != metadata.SizeBytes {
 			validationErr = fmt.Errorf("sidecar size is %d bytes, file is %d bytes", metadata.SizeBytes, fileInfo.Size())
 		}
 		if validationErr != nil {
 			if cleanupErr := removeCachePair(tilePath, sidecarPath); cleanupErr != nil {
-				return fmt.Errorf("reconcile cache file %q: %w; cleanup: %v", tilePath, validationErr, cleanupErr)
+				return fmt.Errorf("reconcile cache file %q: %w; cleanup: %w", tilePath, validationErr, cleanupErr)
 			}
 			slog.Warn("removed missing or size-mismatched cache entry", "path", tilePath, "error", validationErr)
 			continue
@@ -120,7 +120,7 @@ func (c *Cache) reconcileFiles(filesRoot string) error {
 		}
 		if validationErr != nil {
 			if cleanupErr := removeCachePair(tilePath, sidecarPath); cleanupErr != nil {
-				return fmt.Errorf("reconcile cache digest %q: %w; cleanup: %v", tilePath, validationErr, cleanupErr)
+				return fmt.Errorf("reconcile cache digest %q: %w; cleanup: %w", tilePath, validationErr, cleanupErr)
 			}
 			slog.Warn("removed cache entry with mismatched digest", "path", tilePath, "error", validationErr)
 			continue
@@ -130,14 +130,12 @@ func (c *Cache) reconcileFiles(filesRoot string) error {
 			lastAccess = time.Unix(0, 1)
 		}
 		entry := &cacheEntry{
-			Entry: Entry{
-				Key:         metadata.Key,
-				Path:        tilePath,
-				SidecarPath: sidecarPath,
-				SizeBytes:   metadata.SizeBytes,
-				Digest:      metadata.Digest,
-				LastAccess:  lastAccess,
-			},
+			Key:         metadata.Key,
+			Path:        tilePath,
+			SidecarPath: sidecarPath,
+			SizeBytes:   metadata.SizeBytes,
+			Digest:      metadata.Digest,
+			LastAccess:  lastAccess,
 		}
 		entry.element = c.lru.PushBack(entry)
 		c.entries[digest] = entry
@@ -238,11 +236,11 @@ func (c *Cache) publish(key Key, stagingPath, currentCatalogVersion string, rese
 	if err := writeSidecarAtomic(sidecarPath, metadata); err != nil {
 		removeErr := removeCachePath(finalPath)
 		if removeErr != nil {
-			return Entry{}, fmt.Errorf("write cache sidecar: %w; remove tile: %v", err, removeErr)
+			return Entry{}, fmt.Errorf("write cache sidecar: %w; remove tile: %w", err, removeErr)
 		}
 		return Entry{}, fmt.Errorf("write cache sidecar: %w", err)
 	}
-	entry := &cacheEntry{Entry: Entry{Key: key, Path: finalPath, SidecarPath: sidecarPath, SizeBytes: actualSize, Digest: actualDigest, LastAccess: lastAccess}}
+	entry := &cacheEntry{Key: key, Path: finalPath, SidecarPath: sidecarPath, SizeBytes: actualSize, Digest: actualDigest, LastAccess: lastAccess}
 	entry.element = c.lru.PushFront(entry)
 	c.entries[digest] = entry
 	c.usedBytes += actualSize
@@ -368,7 +366,7 @@ type Reader struct {
 
 func (reader *Reader) Entry() (Entry, error) {
 	if reader == nil || reader.cache == nil || reader.entry == nil {
-		return Entry{}, fmt.Errorf("get cache reader entry: reader is nil")
+		return Entry{}, errors.New("get cache reader entry: reader is nil")
 	}
 	reader.cache.mu.Lock()
 	defer reader.cache.mu.Unlock()
@@ -392,7 +390,7 @@ func (reader *Reader) Stat() (os.FileInfo, error) {
 
 func (reader *Reader) Close() error {
 	if reader == nil {
-		return fmt.Errorf("close cache reader: reader is nil")
+		return errors.New("close cache reader: reader is nil")
 	}
 	reader.closeOnce.Do(func() {
 		reader.closeErr = reader.file.Close()
@@ -424,7 +422,10 @@ func (c *Cache) evictOverLimitLocked(currentCatalogVersion string) error {
 func (c *Cache) evictOneLocked(currentCatalogVersion string) error {
 	var candidate *cacheEntry
 	for element := c.lru.Back(); element != nil; element = element.Prev() {
-		entry := element.Value.(*cacheEntry)
+		entry, ok := element.Value.(*cacheEntry)
+		if !ok {
+			return fmt.Errorf("cache LRU contains %T, want *cacheEntry", element.Value)
+		}
 		if entry.readers != 0 {
 			continue
 		}
@@ -436,7 +437,10 @@ func (c *Cache) evictOneLocked(currentCatalogVersion string) error {
 	}
 	if candidate == nil {
 		for element := c.lru.Back(); element != nil; element = element.Prev() {
-			entry := element.Value.(*cacheEntry)
+			entry, ok := element.Value.(*cacheEntry)
+			if !ok {
+				return fmt.Errorf("cache LRU contains %T, want *cacheEntry", element.Value)
+			}
 			if entry.readers == 0 {
 				candidate = entry
 				break
@@ -481,9 +485,9 @@ func (c *Cache) signalCapacityLocked() {
 	c.capacityChanged = make(chan struct{})
 }
 
-func (c *Cache) validateStagingPath(key Key, stagingPath, digest string) error {
+func (c *Cache) validateStagingPath(_ Key, stagingPath, digest string) error {
 	if stagingPath == "" {
-		return fmt.Errorf("cache staging path is empty")
+		return errors.New("cache staging path is empty")
 	}
 	root := filepath.Join(c.root, stagingDirectory, digest[:2]) + string(filepath.Separator)
 	cleanPath := filepath.Clean(stagingPath)
@@ -531,7 +535,7 @@ func writeSidecarAtomic(path string, metadata sidecarMetadata) error {
 		closeErr := temporary.Close()
 		removeErr := removeCachePath(temporaryPath)
 		if closeErr != nil || removeErr != nil {
-			return fmt.Errorf("%w; close temporary: %v; remove temporary: %v", cause, closeErr, removeErr)
+			return fmt.Errorf("%w; close temporary: %w; remove temporary: %w", cause, closeErr, removeErr)
 		}
 		return cause
 	}
@@ -543,13 +547,13 @@ func writeSidecarAtomic(path string, metadata sidecarMetadata) error {
 	}
 	if err := temporary.Close(); err != nil {
 		if removeErr := removeCachePath(temporaryPath); removeErr != nil {
-			return fmt.Errorf("close sidecar temporary file: %w; remove temporary: %v", err, removeErr)
+			return fmt.Errorf("close sidecar temporary file: %w; remove temporary: %w", err, removeErr)
 		}
 		return fmt.Errorf("close sidecar temporary file: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		if removeErr := removeCachePath(temporaryPath); removeErr != nil {
-			return fmt.Errorf("publish sidecar: %w; remove temporary: %v", err, removeErr)
+			return fmt.Errorf("publish sidecar: %w; remove temporary: %w", err, removeErr)
 		}
 		return fmt.Errorf("publish sidecar: %w", err)
 	}
@@ -575,7 +579,7 @@ func hashFile(path string) (string, int64, error) {
 		return "", 0, err
 	}
 	if fileInfo.Size() != bytesRead {
-		return "", 0, fmt.Errorf("file changed while hashing")
+		return "", 0, errors.New("file changed while hashing")
 	}
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), bytesRead, nil
 }

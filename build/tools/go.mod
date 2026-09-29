@@ -1,4 +1,4 @@
-module github.com/mstenber/overturetunkki/build/tools
+module github.com/fingon/overturetunkki/build/tools
 
 go 1.27.0
 

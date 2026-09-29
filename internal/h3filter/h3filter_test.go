@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package h3filter
 
 import (
@@ -186,7 +187,7 @@ func TestCellBoundsAreConservative(t *testing.T) {
 			}
 			for index, vertex := range boundary {
 				assert.Assert(t, bounds.ContainsPoint(vertex.Lat, vertex.Lng), "vertex", index)
-				for step := 0; step <= 20; step++ {
+				for step := range 21 {
 					fraction := float64(step) / 20
 					latitudeDeg := center.Lat + (vertex.Lat-center.Lat)*fraction
 					longitudeDeltaDeg := normalizeLongitude(vertex.Lng - center.Lng)
@@ -312,8 +313,8 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 				return
 			}
 			predicate, predicateArgs := bounds.DuckDBBBoxPredicate()
-			unpruned := queryIDs(t, connection, "TRUE", nil, cell)
-			pruned := queryIDs(t, connection, predicate, predicateArgs, cell)
+			unpruned := queryIDs(t, membershipQuery{connection: connection, predicate: "TRUE", cell: cell})
+			pruned := queryIDs(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 			assert.DeepEqual(t, pruned, unpruned)
 
 			candidateCount := countCandidates(t, connection, predicate, predicateArgs)
@@ -338,44 +339,44 @@ func BenchmarkCellMembershipPruning(b *testing.B) {
 	b.Run("unpruned", func(b *testing.B) {
 		b.ReportMetric(float64(syntheticPointCount), "candidate_rows")
 		for range b.N {
-			countMembership(b, connection, "TRUE", nil, cell)
+			countMembership(b, membershipQuery{connection: connection, predicate: "TRUE", cell: cell})
 		}
 	})
 	b.Run("pruned", func(b *testing.B) {
 		b.ReportMetric(float64(candidateCount), "candidate_rows")
 		for range b.N {
-			countMembership(b, connection, predicate, predicateArgs, cell)
+			countMembership(b, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 		}
 	})
 }
 
-func openDuckDBConnection(t testing.TB) *sql.Conn {
-	t.Helper()
+func openDuckDBConnection(tb testing.TB) *sql.Conn {
+	tb.Helper()
 	db, err := sql.Open("duckdb", "")
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	t.Cleanup(func() {
-		assert.NilError(t, db.Close())
+	tb.Cleanup(func() {
+		assert.NilError(tb, db.Close())
 	})
 
 	connection, err := db.Conn(context.Background())
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
-	t.Cleanup(func() {
-		assert.NilError(t, connection.Close())
+	tb.Cleanup(func() {
+		assert.NilError(tb, connection.Close())
 	})
-	assert.NilError(t, RegisterCellContains(connection))
+	assert.NilError(tb, RegisterCellContains(connection))
 	return connection
 }
 
-func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []syntheticPoint) {
-	t.Helper()
+func createSyntheticPointTable(tb testing.TB, connection *sql.Conn, points []syntheticPoint) {
+	tb.Helper()
 	_, err := connection.ExecContext(context.Background(), `
 		CREATE TABLE points AS
 		SELECT
@@ -389,13 +390,14 @@ func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []synt
 				ymax := (-89.5 + ((i * 37) % 178)::DOUBLE)
 			) AS bbox
 		FROM range(?) AS source(i)`, syntheticPointCount)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	for _, point := range points {
-		if point.nullBBox {
+		switch {
+		case point.nullBBox:
 			_, err = connection.ExecContext(
 				context.Background(),
 				"INSERT INTO points (id, latitude, longitude, bbox) VALUES (?, ?, ?, NULL)",
@@ -403,7 +405,7 @@ func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []synt
 				point.latitudeDeg,
 				point.longitudeDeg,
 			)
-		} else if point.invalidBBox {
+		case point.invalidBBox:
 			_, err = connection.ExecContext(
 				context.Background(),
 				"INSERT INTO points (id, latitude, longitude, bbox) VALUES (?, ?, ?, struct_pack(xmin := 200.0, xmax := 201.0, ymin := 20.0, ymax := 21.0))",
@@ -411,7 +413,7 @@ func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []synt
 				point.latitudeDeg,
 				point.longitudeDeg,
 			)
-		} else if point.wrappedBBox {
+		case point.wrappedBBox:
 			_, err = connection.ExecContext(
 				context.Background(),
 				"INSERT INTO points (id, latitude, longitude, bbox) VALUES (?, ?, ?, struct_pack(xmin := 179.0, xmax := -179.0, ymin := ?, ymax := ?))",
@@ -421,7 +423,7 @@ func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []synt
 				point.latitudeDeg,
 				point.latitudeDeg,
 			)
-		} else {
+		default:
 			_, err = connection.ExecContext(
 				context.Background(),
 				"INSERT INTO points (id, latitude, longitude, bbox) VALUES (?, ?, ?, struct_pack(xmin := ?, xmax := ?, ymin := ?, ymax := ?))",
@@ -434,111 +436,118 @@ func createSyntheticPointTable(t testing.TB, connection *sql.Conn, points []synt
 				point.latitudeDeg,
 			)
 		}
-		assert.NilError(t, err)
+		assert.NilError(tb, err)
 		if err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 }
 
-func queryIDs(t testing.TB, connection *sql.Conn, predicate string, predicateArgs []any, cell h3.Cell) []int64 {
-	t.Helper()
-	args := append([]any(nil), predicateArgs...)
-	args = append(args, uint64(cell))
-	rows, err := connection.QueryContext(
+type membershipQuery struct {
+	connection    *sql.Conn
+	predicate     string
+	predicateArgs []any
+	cell          h3.Cell
+}
+
+func queryIDs(tb testing.TB, query membershipQuery) []int64 {
+	tb.Helper()
+	args := append([]any(nil), query.predicateArgs...)
+	args = append(args, uint64(query.cell))
+	rows, err := query.connection.QueryContext(
 		context.Background(),
-		fmt.Sprintf("SELECT id FROM points WHERE %s AND h3_cell_contains(latitude, longitude, CAST(? AS UBIGINT)) ORDER BY id", predicate),
+		fmt.Sprintf("SELECT id FROM points WHERE %s AND h3_cell_contains(latitude, longitude, CAST(? AS UBIGINT)) ORDER BY id", query.predicate),
 		args...,
 	)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
 		return nil
 	}
-	defer func() { assert.NilError(t, rows.Close()) }()
+	defer func() { assert.NilError(tb, rows.Close()) }()
 
 	ids := make([]int64, 0)
 	for rows.Next() {
 		var id int64
 		err = rows.Scan(&id)
-		assert.NilError(t, err)
+		assert.NilError(tb, err)
 		if err != nil {
 			return nil
 		}
 		ids = append(ids, id)
 	}
-	assert.NilError(t, rows.Err())
+	assert.NilError(tb, rows.Err())
 	return ids
 }
 
-func countCandidates(t testing.TB, connection *sql.Conn, predicate string, predicateArgs []any) int64 {
-	t.Helper()
+func countCandidates(tb testing.TB, connection *sql.Conn, predicate string, predicateArgs []any) int64 {
+	tb.Helper()
 	var count int64
 	err := connection.QueryRowContext(
 		context.Background(),
-		fmt.Sprintf("SELECT count(*) FROM points WHERE %s", predicate),
+		"SELECT count(*) FROM points WHERE "+predicate,
 		predicateArgs...,
 	).Scan(&count)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	return count
 }
 
-func countMembership(t testing.TB, connection *sql.Conn, predicate string, predicateArgs []any, cell h3.Cell) {
-	t.Helper()
-	args := append([]any(nil), predicateArgs...)
-	args = append(args, uint64(cell))
+func countMembership(tb testing.TB, query membershipQuery) {
+	tb.Helper()
+	args := append([]any(nil), query.predicateArgs...)
+	args = append(args, uint64(query.cell))
 	var count int64
-	err := connection.QueryRowContext(
+	err := query.connection.QueryRowContext(
 		context.Background(),
-		fmt.Sprintf("SELECT count(*) FROM points WHERE %s AND h3_cell_contains(latitude, longitude, CAST(? AS UBIGINT))", predicate),
+		fmt.Sprintf("SELECT count(*) FROM points WHERE %s AND h3_cell_contains(latitude, longitude, CAST(? AS UBIGINT))", query.predicate),
 		args...,
 	).Scan(&count)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 }
 
-func mustCell(t testing.TB, latitudeDeg, longitudeDeg float64, resolution int) h3.Cell {
-	t.Helper()
+func mustCell(tb testing.TB, latitudeDeg, longitudeDeg float64, resolution int) h3.Cell {
+	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(latitudeDeg, longitudeDeg), resolution)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return cell
 }
 
-func mustCellCenter(t testing.TB, cell h3.Cell) h3.LatLng {
-	t.Helper()
+func mustCellCenter(tb testing.TB, cell h3.Cell) h3.LatLng {
+	tb.Helper()
 	center, err := h3.CellToLatLng(cell)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return center
 }
 
-func mustCellBounds(t testing.TB, cell h3.Cell) Bounds {
-	t.Helper()
+func mustCellBounds(tb testing.TB, cell h3.Cell) Bounds {
+	tb.Helper()
 	bounds, err := CellBounds(cell)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return bounds
 }
 
-func mustAntimeridianCell(t testing.TB) h3.Cell {
-	t.Helper()
+func mustAntimeridianCell(tb testing.TB) h3.Cell {
+	tb.Helper()
 	for resolution := 1; resolution <= h3.MaxResolution; resolution++ {
 		for longitudeDeg := 179.9; longitudeDeg <= 180; longitudeDeg += 0.01 {
-			cell := mustCell(t, 0, longitudeDeg, resolution)
-			bounds := mustCellBounds(t, cell)
+			cell := mustCell(tb, 0, longitudeDeg, resolution)
+			bounds := mustCellBounds(tb, cell)
 			if len(bounds.LongitudeIntervals) == 2 {
 				return cell
 			}
 		}
 	}
-	t.Fatal("could not find an H3 cell whose conservative bounds cross the antimeridian")
+	tb.Fatal("could not find an H3 cell whose conservative bounds cross the antimeridian")
 	return 0
 }

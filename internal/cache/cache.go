@@ -1,3 +1,4 @@
+//nolint:tagliatelle // Persisted cache metadata uses the documented snake_case schema.
 package cache
 
 import (
@@ -108,7 +109,7 @@ type Reservation struct {
 
 func New(options Options) (*Cache, error) {
 	if options.Root == "" {
-		return nil, fmt.Errorf("cache root must not be empty")
+		return nil, errors.New("cache root must not be empty")
 	}
 	if !filepath.IsAbs(options.Root) {
 		return nil, fmt.Errorf("cache root must be absolute, got %q", options.Root)
@@ -130,7 +131,7 @@ func New(options Options) (*Cache, error) {
 	if err := acquireCacheLock(lockFile); err != nil {
 		closeErr := lockFile.Close()
 		if closeErr != nil {
-			return nil, fmt.Errorf("acquire cache lock %q: %w; close lock: %v", lockPath, err, closeErr)
+			return nil, fmt.Errorf("acquire cache lock %q: %w; close lock: %w", lockPath, err, closeErr)
 		}
 		if errors.Is(err, ErrCacheInUse) {
 			return nil, err
@@ -150,7 +151,7 @@ func New(options Options) (*Cache, error) {
 		closeErr := releaseCacheLock(lockFile)
 		fileCloseErr := lockFile.Close()
 		if closeErr != nil || fileCloseErr != nil {
-			return nil, fmt.Errorf("initialize cache: %w; release lock: %v; close lock: %v", err, closeErr, fileCloseErr)
+			return nil, fmt.Errorf("initialize cache: %w; release lock: %w; close lock: %w", err, closeErr, fileCloseErr)
 		}
 		return nil, err
 	}
@@ -159,7 +160,7 @@ func New(options Options) (*Cache, error) {
 
 func (c *Cache) Close() error {
 	if c == nil {
-		return fmt.Errorf("close cache: cache is nil")
+		return errors.New("close cache: cache is nil")
 	}
 	c.mu.Lock()
 	if c.closed {
@@ -193,7 +194,7 @@ func (c *Cache) Close() error {
 	if err := releaseCacheLock(lockFile); err != nil {
 		closeErr := lockFile.Close()
 		if closeErr != nil {
-			return fmt.Errorf("release cache lock: %w; close lock: %v", err, closeErr)
+			return fmt.Errorf("release cache lock: %w; close lock: %w", err, closeErr)
 		}
 		return fmt.Errorf("release cache lock: %w", err)
 	}
@@ -252,7 +253,7 @@ func (c *Cache) RemoveStaging(path string) error {
 		return err
 	}
 	if path == "" {
-		return fmt.Errorf("remove staging: path is empty")
+		return errors.New("remove staging: path is empty")
 	}
 	stagingRoot := filepath.Join(c.root, stagingDirectory) + string(filepath.Separator)
 	cleanPath := filepath.Clean(path)
@@ -267,10 +268,10 @@ func (c *Cache) RemoveStaging(path string) error {
 
 func (c *Cache) Reserve(ctx context.Context, bytes int64) (*Reservation, error) {
 	if c == nil {
-		return nil, fmt.Errorf("reserve cache capacity: cache is nil")
+		return nil, errors.New("reserve cache capacity: cache is nil")
 	}
 	if ctx == nil {
-		return nil, fmt.Errorf("reserve cache capacity: context is nil")
+		return nil, errors.New("reserve cache capacity: context is nil")
 	}
 	if bytes <= 0 {
 		return nil, fmt.Errorf("reserve cache capacity: bytes must be positive, got %d", bytes)
@@ -347,7 +348,7 @@ func (reservation *Reservation) Release() error {
 
 func (key Key) digest() (string, error) {
 	if key.CatalogVersion == "" || key.ProjectionID == "" || key.Cell == "" || key.SizePolicyID == "" {
-		return "", fmt.Errorf("cache key fields must not be empty")
+		return "", errors.New("cache key fields must not be empty")
 	}
 	encoded, err := json.Marshal(key)
 	if err != nil {
@@ -359,7 +360,7 @@ func (key Key) digest() (string, error) {
 
 func (c *Cache) ensureOpen() error {
 	if c == nil {
-		return fmt.Errorf("cache is nil")
+		return errors.New("cache is nil")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

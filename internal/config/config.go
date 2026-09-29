@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -37,37 +38,38 @@ const (
 	DefaultNegativeCacheEntries int64 = 10_000
 	DefaultNegativeCacheTTL           = 5 * time.Minute
 	DefaultWriteTimeout               = 30 * time.Second
+	geometryField                     = "geometry"
 )
 
 type Config struct {
-	Mode                 Mode          `name:"mode" env:"OVERTURE_MODE" default:"supervisor" enum:"supervisor,worker" help:"Process mode."`
-	Listen               string        `name:"listen" env:"OVERTURE_LISTEN" default:":8080" help:"HTTP listen address."`
-	CatalogURL           string        `name:"catalog-url" env:"OVERTURE_CATALOG_URL" default:"https://stac.overturemaps.org/catalog.json" help:"Trusted STAC catalog endpoint."`
-	CatalogHost          string        `name:"catalog-host" env:"OVERTURE_CATALOG_HOST" default:"stac.overturemaps.org" help:"Trusted STAC catalog host."`
-	AssetHost            string        `name:"asset-host" env:"OVERTURE_ASSET_HOST" default:"overturemaps-us-west-2.s3.us-west-2.amazonaws.com" help:"Trusted places asset host."`
-	CatalogPollInterval  time.Duration `name:"catalog-poll-interval" env:"OVERTURE_CATALOG_POLL_INTERVAL" default:"1m" help:"Additional idle catalog refresh interval."`
-	CatalogTimeout       time.Duration `name:"catalog-timeout" env:"OVERTURE_CATALOG_TIMEOUT" default:"10s" help:"Complete catalog freshness-check deadline."`
-	Fields               []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,basic_category" sep:"," help:"Comma-separated top-level output fields."`
-	MaxTileBytes         int64         `name:"max-tile-bytes" env:"OVERTURE_MAX_TILE_BYTES" default:"8388608" help:"Maximum complete zstd Parquet tile size in bytes."`
-	MaxTileRows          int64         `name:"max-tile-rows" env:"OVERTURE_MAX_TILE_ROWS" default:"100000" help:"Additional early tile row rejection threshold."`
-	CacheDir             string        `name:"cache-dir" env:"OVERTURE_CACHE_DIR" default:"/var/cache/overture" help:"Exclusive writable cache root."`
-	CacheMaxBytes        int64         `name:"cache-max-bytes" env:"OVERTURE_CACHE_MAX_BYTES" default:"10737418240" help:"Complete files and reservations cache limit in bytes."`
-	CacheMaxEntries      int64         `name:"cache-max-entries" env:"OVERTURE_CACHE_MAX_ENTRIES" default:"100000" help:"Maximum cache file and metadata entries."`
-	ScratchMaxBytes      int64         `name:"scratch-max-bytes" env:"OVERTURE_SCRATCH_MAX_BYTES" default:"2147483648" help:"Total worker scratch allowance in bytes."`
-	WorkerCount          int64         `name:"worker-count" env:"OVERTURE_WORKER_COUNT" default:"2" help:"Concurrent DuckDB jobs."`
-	WorkerMemoryBytes    int64         `name:"worker-memory-bytes" env:"OVERTURE_WORKER_MEMORY_BYTES" default:"536870912" help:"DuckDB memory limit per worker in bytes."`
-	WorkerThreads        int64         `name:"worker-threads" env:"OVERTURE_WORKER_THREADS" default:"2" help:"DuckDB threads per worker."`
-	QueueCapacity        int64         `name:"queue-capacity" env:"OVERTURE_QUEUE_CAPACITY" default:"32" help:"Maximum waiting tile builds."`
-	TileTimeout          time.Duration `name:"tile-timeout" env:"OVERTURE_TILE_TIMEOUT" default:"30s" help:"Queue and tile query deadline."`
-	NegativeCacheEntries int64         `name:"negative-cache-entries" env:"OVERTURE_NEGATIVE_CACHE_ENTRIES" default:"10000" help:"Maximum retained size rejections."`
-	NegativeCacheTTL     time.Duration `name:"negative-cache-ttl" env:"OVERTURE_NEGATIVE_CACHE_TTL" default:"5m" help:"Size rejection lifetime."`
-	WriteTimeout         time.Duration `name:"write-timeout" env:"OVERTURE_WRITE_TIMEOUT" default:"30s" help:"Maximum response transmission time."`
-	Verbose              bool          `short:"v" env:"OVERTURE_VERBOSE" help:"Set the default slog level to debug."`
+	Mode                 Mode          `default:"supervisor" enum:"supervisor,worker" env:"OVERTURE_MODE" help:"Process mode." name:"mode"`
+	Listen               string        `default:":8080" env:"OVERTURE_LISTEN" help:"HTTP listen address." name:"listen"`
+	CatalogURL           string        `default:"https://stac.overturemaps.org/catalog.json" env:"OVERTURE_CATALOG_URL" help:"Trusted STAC catalog endpoint." name:"catalog-url"`
+	CatalogHost          string        `default:"stac.overturemaps.org" env:"OVERTURE_CATALOG_HOST" help:"Trusted STAC catalog host." name:"catalog-host"`
+	AssetHost            string        `default:"overturemaps-us-west-2.s3.us-west-2.amazonaws.com" env:"OVERTURE_ASSET_HOST" help:"Trusted places asset host." name:"asset-host"`
+	CatalogPollInterval  time.Duration `default:"1m" env:"OVERTURE_CATALOG_POLL_INTERVAL" help:"Additional idle catalog refresh interval." name:"catalog-poll-interval"`
+	CatalogTimeout       time.Duration `default:"10s" env:"OVERTURE_CATALOG_TIMEOUT" help:"Complete catalog freshness-check deadline." name:"catalog-timeout"`
+	Fields               []string      `default:"id,geometry,names,basic_category" env:"OVERTURE_FIELDS" help:"Comma-separated top-level output fields." name:"fields" sep:","`
+	MaxTileBytes         int64         `default:"8388608" env:"OVERTURE_MAX_TILE_BYTES" help:"Maximum complete zstd Parquet tile size in bytes." name:"max-tile-bytes"`
+	MaxTileRows          int64         `default:"100000" env:"OVERTURE_MAX_TILE_ROWS" help:"Additional early tile row rejection threshold." name:"max-tile-rows"`
+	CacheDir             string        `default:"/var/cache/overture" env:"OVERTURE_CACHE_DIR" help:"Exclusive writable cache root." name:"cache-dir"`
+	CacheMaxBytes        int64         `default:"10737418240" env:"OVERTURE_CACHE_MAX_BYTES" help:"Complete files and reservations cache limit in bytes." name:"cache-max-bytes"`
+	CacheMaxEntries      int64         `default:"100000" env:"OVERTURE_CACHE_MAX_ENTRIES" help:"Maximum cache file and metadata entries." name:"cache-max-entries"`
+	ScratchMaxBytes      int64         `default:"2147483648" env:"OVERTURE_SCRATCH_MAX_BYTES" help:"Total worker scratch allowance in bytes." name:"scratch-max-bytes"`
+	WorkerCount          int64         `default:"2" env:"OVERTURE_WORKER_COUNT" help:"Concurrent DuckDB jobs." name:"worker-count"`
+	WorkerMemoryBytes    int64         `default:"536870912" env:"OVERTURE_WORKER_MEMORY_BYTES" help:"DuckDB memory limit per worker in bytes." name:"worker-memory-bytes"`
+	WorkerThreads        int64         `default:"2" env:"OVERTURE_WORKER_THREADS" help:"DuckDB threads per worker." name:"worker-threads"`
+	QueueCapacity        int64         `default:"32" env:"OVERTURE_QUEUE_CAPACITY" help:"Maximum waiting tile builds." name:"queue-capacity"`
+	TileTimeout          time.Duration `default:"30s" env:"OVERTURE_TILE_TIMEOUT" help:"Queue and tile query deadline." name:"tile-timeout"`
+	NegativeCacheEntries int64         `default:"10000" env:"OVERTURE_NEGATIVE_CACHE_ENTRIES" help:"Maximum retained size rejections." name:"negative-cache-entries"`
+	NegativeCacheTTL     time.Duration `default:"5m" env:"OVERTURE_NEGATIVE_CACHE_TTL" help:"Size rejection lifetime." name:"negative-cache-ttl"`
+	WriteTimeout         time.Duration `default:"30s" env:"OVERTURE_WRITE_TIMEOUT" help:"Maximum response transmission time." name:"write-timeout"`
+	Verbose              bool          `env:"OVERTURE_VERBOSE" help:"Set the default slog level to debug." short:"v"`
 }
 
 var supportedFields = map[string]struct{}{
 	"id":               {},
-	"geometry":         {},
+	geometryField:      {},
 	"confidence":       {},
 	"websites":         {},
 	"emails":           {},
@@ -157,7 +159,7 @@ func (c Config) Validate() error {
 		}
 	}
 	if c.CacheDir == "" {
-		return fmt.Errorf("cache-dir must not be empty")
+		return errors.New("cache-dir must not be empty")
 	}
 	if !filepath.IsAbs(c.CacheDir) {
 		return fmt.Errorf("cache-dir must be absolute, got %q", c.CacheDir)
@@ -169,12 +171,12 @@ func (c Config) Validate() error {
 		return fmt.Errorf("worker-count %d exceeds scratch capacity for max-tile-bytes %d", c.WorkerCount, c.MaxTileBytes)
 	}
 	if len(c.Fields) == 0 {
-		return fmt.Errorf("fields must not be empty")
+		return errors.New("fields must not be empty")
 	}
 	seenFields := make(map[string]struct{}, len(c.Fields))
 	for _, field := range c.Fields {
 		if field == "" {
-			return fmt.Errorf("fields contains an empty name")
+			return errors.New("fields contains an empty name")
 		}
 		if _, ok := supportedFields[field]; !ok {
 			return fmt.Errorf("field %q is not supported", field)
@@ -184,7 +186,7 @@ func (c Config) Validate() error {
 		}
 		seenFields[field] = struct{}{}
 	}
-	for _, requiredField := range []string{"id", "geometry"} {
+	for _, requiredField := range []string{"id", geometryField} {
 		if _, ok := seenFields[requiredField]; !ok {
 			return fmt.Errorf("fields must include %q", requiredField)
 		}
@@ -194,7 +196,7 @@ func (c Config) Validate() error {
 
 func ValidateCacheDirectory(cacheDir string) error {
 	if cacheDir == "" {
-		return fmt.Errorf("cache-dir must not be empty")
+		return errors.New("cache-dir must not be empty")
 	}
 	if !filepath.IsAbs(cacheDir) {
 		return fmt.Errorf("cache-dir must be absolute, got %q", cacheDir)
@@ -210,7 +212,7 @@ func ValidateCacheDirectory(cacheDir string) error {
 	if err := probe.Close(); err != nil {
 		removeErr := os.Remove(probePath)
 		if removeErr != nil {
-			return fmt.Errorf("close cache write probe %q: %w; remove probe: %v", probePath, err, removeErr)
+			return fmt.Errorf("close cache write probe %q: %w; remove probe: %w", probePath, err, removeErr)
 		}
 		return fmt.Errorf("close cache write probe %q: %w", probePath, err)
 	}
@@ -236,7 +238,7 @@ func normalize(c Config) Config {
 
 func validateListenAddress(listen string) error {
 	if listen == "" {
-		return fmt.Errorf("listen must not be empty")
+		return errors.New("listen must not be empty")
 	}
 	_, port, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -261,7 +263,7 @@ func validateCatalogURL(rawURL string) error {
 		return fmt.Errorf("catalog-url %q must be an HTTP(S) URL", rawURL)
 	}
 	if parsed.User != nil {
-		return fmt.Errorf("catalog-url must not contain user information")
+		return errors.New("catalog-url must not contain user information")
 	}
 	return nil
 }

@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package cache
 
 import (
@@ -175,9 +176,9 @@ func TestCachePublishesPinsEvictsAndPersists(t *testing.T) {
 	newKey := testKey()
 	newKey.CatalogVersion = "new-release"
 	newKey.Cell = "8928308280ffffe"
-	oldEntry := publishTestEntry(t, cache, oldKey, 4, "new-release")
-	_ = publishTestEntry(t, cache, currentKey, 4, "new-release")
-	thirdEntry := publishTestEntry(t, cache, newKey, 4, "new-release")
+	oldEntry := cache.publishTestEntry(t, oldKey, 4, "new-release")
+	_ = cache.publishTestEntry(t, currentKey, 4, "new-release")
+	thirdEntry := cache.publishTestEntry(t, newKey, 4, "new-release")
 	assert.Assert(t, !fileExists(oldEntry.Path))
 	assert.Assert(t, fileExists(thirdEntry.Path))
 	assert.NilError(t, cache.Touch(currentKey))
@@ -216,7 +217,7 @@ func TestCacheReopenDoesNotServeOldGenerationForNewKey(t *testing.T) {
 	}
 	oldKey := testKey()
 	oldKey.CatalogVersion = "old-release"
-	publishTestEntry(t, cache, oldKey, 4, oldKey.CatalogVersion)
+	cache.publishTestEntry(t, oldKey, 4, oldKey.CatalogVersion)
 	assert.NilError(t, cache.Close())
 
 	reopened, err := New(Options{Root: root, MaxBytes: 10, MaxEntries: 2})
@@ -347,7 +348,7 @@ func TestCachePinnedCapacityAndCorruptStartupCleanup(t *testing.T) {
 		return
 	}
 	key := testKey()
-	entry := publishTestEntry(t, cache, key, 8, key.CatalogVersion)
+	entry := cache.publishTestEntry(t, key, 8, key.CatalogVersion)
 	reader, err := cache.Open(key)
 	assert.NilError(t, err)
 	if err != nil {
@@ -380,7 +381,7 @@ func TestCachePinnedCapacityAndCorruptStartupCleanup(t *testing.T) {
 	assert.NilError(t, reopened.Close())
 }
 
-func publishTestEntry(t *testing.T, cache *Cache, key Key, size int, currentCatalogVersion string) Entry {
+func (cache *Cache) publishTestEntry(t *testing.T, key Key, size int, currentCatalogVersion string) Entry {
 	t.Helper()
 	staging, err := cache.CreateStaging(key)
 	assert.NilError(t, err)
@@ -517,7 +518,7 @@ func TestSchedulerCallerDetachmentCancelsUnobservedBuild(t *testing.T) {
 	canceled := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- scheduler.Do(callerContext, testKey(), 10, func(ctx context.Context, reservation *Reservation) error {
+		done <- scheduler.Do(callerContext, testKey(), 10, func(ctx context.Context, _ *Reservation) error {
 			close(started)
 			<-ctx.Done()
 			close(canceled)
@@ -547,7 +548,7 @@ func TestSchedulerRejectsFullQueueAndClosedState(t *testing.T) {
 	release := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- scheduler.Do(context.Background(), key, 10, func(ctx context.Context, reservation *Reservation) error {
+		firstDone <- scheduler.Do(context.Background(), key, 10, func(_ context.Context, _ *Reservation) error {
 			close(started)
 			<-release
 			return nil

@@ -1,3 +1,4 @@
+//nolint:tagliatelle // HTTP API fields use the documented snake_case schema.
 package httpapi
 
 import (
@@ -15,9 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/cache"
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/worker"
+	"github.com/fingon/overturetunkki/internal/cache"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 )
 
@@ -35,6 +36,14 @@ const (
 	tileDigestPrefix           = "sha256:"
 	capacityUnavailableCode    = "capacity_unavailable"
 	capacityUnavailableMessage = "tile capacity is unavailable"
+	internalErrorCode          = "internal_error"
+	invalidRequestCode         = "invalid_request"
+	catalogUnavailableCode     = "catalog_unavailable"
+	catalogUnavailableMessage  = "catalog is unavailable"
+	catalogChangedCode         = "catalog_changed"
+	catalogPath                = "/v1/catalog"
+	statusField                = "status"
+	methodNotAllowedMessage    = "method must be GET"
 	serverShuttingDownCode     = "server_shutting_down"
 	serverShuttingDownMessage  = "HTTP server is shutting down"
 )
@@ -125,22 +134,22 @@ type errorResponse struct {
 
 func New(options Options) (*Server, error) {
 	if options.Observer == nil {
-		return nil, fmt.Errorf("HTTP server observer is nil")
+		return nil, errors.New("HTTP server observer is nil")
 	}
 	if options.Provider == nil {
-		return nil, fmt.Errorf("HTTP server tile provider is nil")
+		return nil, errors.New("HTTP server tile provider is nil")
 	}
 	if len(options.Fields) == 0 {
-		return nil, fmt.Errorf("HTTP server fields must not be empty")
+		return nil, errors.New("HTTP server fields must not be empty")
 	}
 	if options.MaxTileBytes <= 0 || options.MaxTileRows <= 0 {
-		return nil, fmt.Errorf("HTTP server tile limits must be positive")
+		return nil, errors.New("HTTP server tile limits must be positive")
 	}
 	if options.TileConcurrency < 0 {
-		return nil, fmt.Errorf("HTTP server tile concurrency must not be negative")
+		return nil, errors.New("HTTP server tile concurrency must not be negative")
 	}
 	if options.WriteTimeout < 0 {
-		return nil, fmt.Errorf("HTTP server write timeout must not be negative")
+		return nil, errors.New("HTTP server write timeout must not be negative")
 	}
 	if options.TileConcurrency == 0 {
 		options.TileConcurrency = defaultTileConcurrency
@@ -163,7 +172,7 @@ func New(options Options) (*Server, error) {
 
 func (server *Server) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
 	if server == nil {
-		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "HTTP server is unavailable"})
+		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "HTTP server is unavailable"})
 		return
 	}
 	requestID := server.requestID(request)
@@ -182,7 +191,7 @@ func (server *Server) ServeHTTP(responseWriter http.ResponseWriter, request *htt
 		server.activeRequests.Done()
 	}()
 	switch {
-	case request.URL.Path == "/v1/catalog":
+	case request.URL.Path == catalogPath:
 		server.serveCatalog(trackedWriter, request)
 	case strings.HasPrefix(request.URL.Path, "/v1/tiles/places/"):
 		server.serveTile(trackedWriter, request)
@@ -241,7 +250,7 @@ func validRequestID(value string) bool {
 
 func (server *Server) countEndpoint(path string) {
 	switch {
-	case path == "/v1/catalog":
+	case path == catalogPath:
 		server.catalogRequests.Add(1)
 	case strings.HasPrefix(path, "/v1/tiles/places/"):
 		server.tileRequests.Add(1)
@@ -299,10 +308,10 @@ func (server *Server) releaseTile() {
 
 func (server *Server) Shutdown(ctx context.Context) error {
 	if server == nil {
-		return fmt.Errorf("HTTP server is nil")
+		return errors.New("HTTP server is nil")
 	}
 	if ctx == nil {
-		return fmt.Errorf("HTTP shutdown context is nil")
+		return errors.New("HTTP shutdown context is nil")
 	}
 	server.stateMu.Lock()
 	server.shuttingDown = true
@@ -322,13 +331,13 @@ func (server *Server) Shutdown(ctx context.Context) error {
 
 func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
-		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: "invalid_request", Message: "method must be GET"})
+		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: invalidRequestCode, Message: methodNotAllowedMessage})
 		return
 	}
 	snapshot, err := server.refresh(request.Context())
 	if err != nil {
 		slog.Error("refresh catalog for HTTP response", "request_id", request.Header.Get(requestIDHeader), "error", err)
-		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 		return
 	}
 	server.writeVersionHeaders(responseWriter, snapshot)
@@ -347,28 +356,28 @@ func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *
 
 func (server *Server) serveTile(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
-		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: "invalid_request", Message: "method must be GET"})
+		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: invalidRequestCode, Message: methodNotAllowedMessage})
 		return
 	}
 	version, err := requiredQueryValue(request, "catalog_version")
 	if err != nil {
-		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: "invalid_request", Message: err.Error()})
+		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: err.Error()})
 		return
 	}
 	cellText := strings.TrimPrefix(request.URL.Path, "/v1/tiles/places/")
 	cell, err := worker.ParseCanonicalCell(cellText)
 	if err != nil {
-		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: "invalid_request", Message: "H3 cell is invalid"})
+		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: "H3 cell is invalid"})
 		return
 	}
 	snapshot, err := server.refresh(request.Context())
 	if err != nil {
 		slog.Error("refresh catalog for tile request", "request_id", request.Header.Get(requestIDHeader), "error", err)
-		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 		return
 	}
 	if version != snapshot.CatalogVersion {
-		writeError(responseWriter, http.StatusConflict, errorResponse{Code: "catalog_changed", Message: "catalog version is stale", Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion})
+		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog version is stale", Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion})
 		return
 	}
 	if err := server.acquireTile(); err != nil {
@@ -398,13 +407,13 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	if err != nil {
 		closeTileReader(request, tile)
 		slog.Error("refresh catalog before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", err)
-		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 		return
 	}
 	if latest.CatalogVersion != snapshot.CatalogVersion || latest.Release != snapshot.Release {
 		closeTileReader(request, tile)
 		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
-		writeError(responseWriter, http.StatusConflict, errorResponse{Code: "catalog_changed", Message: "catalog changed before response", Release: latest.Release, CatalogVersion: latest.CatalogVersion})
+		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog changed before response", Release: latest.Release, CatalogVersion: latest.CatalogVersion})
 		return
 	}
 	server.serveTileFile(responseWriter, request, snapshot, tile)
@@ -414,7 +423,7 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 	if tile.Path == "" || tile.SizeBytes <= 0 || !validTileDigest(tile.Digest) {
 		closeTileReader(request, tile)
 		slog.Error("tile metadata is invalid", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "size_bytes", tile.SizeBytes)
-		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata is invalid"})
+		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "tile metadata is invalid"})
 		return
 	}
 	file := tile.Reader
@@ -422,7 +431,7 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 		openedFile, err := os.Open(tile.Path)
 		if err != nil {
 			slog.Error("open tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
-			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile cannot be opened"})
+			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "tile cannot be opened"})
 			return
 		}
 		file = openedFile
@@ -439,7 +448,7 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 		} else {
 			slog.Error("tile response file does not match metadata", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "expected_bytes", tile.SizeBytes, "actual_bytes", fileInfo.Size(), "regular", fileInfo.Mode().IsRegular())
 		}
-		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata does not match file"})
+		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "tile metadata does not match file"})
 		return
 	}
 	responseController := http.NewResponseController(responseWriter)
@@ -447,7 +456,7 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 	if err := responseController.SetWriteDeadline(time.Now().Add(server.options.WriteTimeout)); err != nil {
 		if !errors.Is(err, http.ErrNotSupported) {
 			slog.Error("set tile response write deadline", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
-			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile response deadline cannot be set"})
+			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "tile response deadline cannot be set"})
 			return
 		}
 		slog.Debug("tile response writer does not support write deadlines", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path)
@@ -501,15 +510,15 @@ func closeTileReader(request *http.Request, tile Tile) {
 
 func (server *Server) serveLive(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
-		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: "invalid_request", Message: "method must be GET"})
+		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: invalidRequestCode, Message: methodNotAllowedMessage})
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(responseWriter, http.StatusOK, map[string]string{statusField: "ok"})
 }
 
 func (server *Server) serveReady(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
-		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: "invalid_request", Message: "method must be GET"})
+		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: invalidRequestCode, Message: methodNotAllowedMessage})
 		return
 	}
 	generation, err := server.observer.Current()
@@ -518,12 +527,12 @@ func (server *Server) serveReady(responseWriter http.ResponseWriter, request *ht
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is not ready", Retryable: true})
 		return
 	}
-	writeJSON(responseWriter, http.StatusOK, map[string]any{"status": "ready", "generation": generation.Number, "catalog_version": generation.Snapshot.CatalogVersion})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{statusField: "ready", "generation": generation.Number, "catalog_version": generation.Snapshot.CatalogVersion})
 }
 
 func (server *Server) serveMetrics(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
-		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: "invalid_request", Message: "method must be GET"})
+		writeError(responseWriter, http.StatusMethodNotAllowed, errorResponse{Code: invalidRequestCode, Message: methodNotAllowedMessage})
 		return
 	}
 	ready := 0
@@ -571,7 +580,7 @@ func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorR
 	case errors.Is(err, worker.ErrUpstream):
 		return http.StatusServiceUnavailable, errorResponse{Code: "upstream_unavailable", Message: "tile source is unavailable", Retryable: true}
 	default:
-		return http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile build failed"}
+		return http.StatusInternalServerError, errorResponse{Code: internalErrorCode, Message: "tile build failed"}
 	}
 }
 
@@ -596,7 +605,7 @@ func sizeErrorResponse(cell h3.Cell, maxTileBytes int64, failedLimit, message st
 }
 
 func etagMatches(header, etag string) bool {
-	for _, candidate := range strings.Split(header, ",") {
+	for candidate := range strings.SplitSeq(header, ",") {
 		if strings.TrimSpace(candidate) == etag {
 			return true
 		}

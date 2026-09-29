@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package client
 
 import (
@@ -24,7 +25,12 @@ func TestClientRequestBuildsBoundedEndpoint(t *testing.T) {
 	if err != nil {
 		return
 	}
-	response, err := httpClient.Request(context.Background(), http.MethodGet, "/v1/catalog", url.Values{"x": []string{"1"}}, http.Header{"X-Test": []string{"value"}})
+	response, err := httpClient.Request(context.Background(), RequestOptions{
+		Method:  http.MethodGet,
+		Path:    "/v1/catalog",
+		Query:   url.Values{"x": []string{"1"}},
+		Headers: http.Header{"X-Test": []string{"value"}},
+	})
 	assert.NilError(t, err)
 	if response != nil {
 		assert.NilError(t, CloseResponse(response))
@@ -48,7 +54,10 @@ func TestClientRequestValidatesInputs(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := httpClient.Request(test.ctx, http.MethodGet, test.path, nil, nil)
+			response, err := httpClient.Request(test.ctx, RequestOptions{Method: http.MethodGet, Path: test.path})
+			if response != nil {
+				assert.NilError(t, CloseResponse(response))
+			}
 			assert.Assert(t, err != nil)
 		})
 	}
@@ -65,7 +74,7 @@ func TestReadBodyEnforcesLimitAndCloses(t *testing.T) {
 	if err != nil {
 		return
 	}
-	response, err := httpClient.Request(context.Background(), http.MethodGet, "/", nil, nil)
+	response, err := httpClient.Request(context.Background(), RequestOptions{Method: http.MethodGet, Path: "/"})
 	assert.NilError(t, err)
 	if err != nil {
 		return

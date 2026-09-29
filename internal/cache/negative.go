@@ -15,9 +15,7 @@ const (
 	RejectionLimitBytes RejectionLimit = "compressed_bytes"
 )
 
-var (
-	ErrNegativeCacheClosed = errors.New("negative cache is closed")
-)
+var ErrNegativeCacheClosed = errors.New("negative cache is closed")
 
 type SizeRejection struct {
 	key       Key
@@ -84,10 +82,10 @@ func NewNegativeCache(maxEntries int, ttl time.Duration) (*NegativeCache, error)
 
 func (cache *NegativeCache) Put(rejection SizeRejection) error {
 	if cache == nil {
-		return fmt.Errorf("put negative cache entry: cache is nil")
+		return errors.New("put negative cache entry: cache is nil")
 	}
 	if rejection.proof == nil {
-		return fmt.Errorf("put negative cache entry: rejection is not proven")
+		return errors.New("put negative cache entry: rejection is not proven")
 	}
 	digest, err := rejection.key.digest()
 	if err != nil {
@@ -111,17 +109,25 @@ func (cache *NegativeCache) Put(rejection SizeRejection) error {
 	for len(cache.entries) > cache.maxEntries {
 		oldest := cache.lru.Back()
 		if oldest == nil {
-			return fmt.Errorf("negative cache LRU is empty")
+			return errors.New("negative cache LRU is empty")
 		}
 		cache.lru.Remove(oldest)
-		delete(cache.entries, oldest.Value.(*negativeEntry).rejection.keyDigest())
+		entry, ok := oldest.Value.(*negativeEntry)
+		if !ok {
+			return fmt.Errorf("negative cache LRU contains %T, want *negativeEntry", oldest.Value)
+		}
+		oldestDigest, err := entry.rejection.key.digest()
+		if err != nil {
+			return fmt.Errorf("digest evicted negative cache entry: %w", err)
+		}
+		delete(cache.entries, oldestDigest)
 	}
 	return nil
 }
 
 func (cache *NegativeCache) Get(key Key) (SizeRejection, bool, error) {
 	if cache == nil {
-		return SizeRejection{}, false, fmt.Errorf("get negative cache entry: cache is nil")
+		return SizeRejection{}, false, errors.New("get negative cache entry: cache is nil")
 	}
 	digest, err := key.digest()
 	if err != nil {
@@ -147,7 +153,7 @@ func (cache *NegativeCache) Get(key Key) (SizeRejection, bool, error) {
 
 func (cache *NegativeCache) Delete(key Key) error {
 	if cache == nil {
-		return fmt.Errorf("delete negative cache entry: cache is nil")
+		return errors.New("delete negative cache entry: cache is nil")
 	}
 	digest, err := key.digest()
 	if err != nil {
@@ -166,10 +172,10 @@ func (cache *NegativeCache) Delete(key Key) error {
 
 func (cache *NegativeCache) DeleteCatalogVersion(catalogVersion string) error {
 	if cache == nil {
-		return fmt.Errorf("delete negative catalog entries: cache is nil")
+		return errors.New("delete negative catalog entries: cache is nil")
 	}
 	if catalogVersion == "" {
-		return fmt.Errorf("delete negative catalog entries: catalog version is empty")
+		return errors.New("delete negative catalog entries: catalog version is empty")
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -186,7 +192,7 @@ func (cache *NegativeCache) DeleteCatalogVersion(catalogVersion string) error {
 
 func (cache *NegativeCache) Close() error {
 	if cache == nil {
-		return fmt.Errorf("close negative cache: cache is nil")
+		return errors.New("close negative cache: cache is nil")
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -197,11 +203,6 @@ func (cache *NegativeCache) Close() error {
 	cache.entries = make(map[string]*negativeEntry)
 	cache.lru.Init()
 	return nil
-}
-
-func (rejection SizeRejection) keyDigest() string {
-	digest, _ := rejection.key.digest()
-	return digest
 }
 
 func (cache *NegativeCache) removeEntryLocked(digest string, entry *negativeEntry) {

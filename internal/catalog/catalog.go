@@ -1,14 +1,17 @@
+//nolint:tagliatelle // External STAC and API schemas define these JSON names.
 package catalog
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -174,10 +177,10 @@ func New(options Options) (*Manager, error) {
 		return nil, fmt.Errorf("validate catalog URL: %w", err)
 	}
 	if options.Timeout <= 0 {
-		return nil, fmt.Errorf("catalog timeout must be positive")
+		return nil, errors.New("catalog timeout must be positive")
 	}
 	if options.MaxResponseBytes <= 0 {
-		return nil, fmt.Errorf("catalog response limit must be positive")
+		return nil, errors.New("catalog response limit must be positive")
 	}
 	if options.CollectionID != DefaultCollectionID {
 		return nil, fmt.Errorf("catalog collection %q is unsupported", options.CollectionID)
@@ -219,7 +222,7 @@ func (m *Manager) RefreshObserved(ctx context.Context, onObserved func(Observati
 
 func (m *Manager) refreshWithObservation(ctx context.Context, onObserved func(Observation)) (Snapshot, error) {
 	if ctx == nil {
-		return Snapshot{}, fmt.Errorf("catalog refresh context is nil")
+		return Snapshot{}, errors.New("catalog refresh context is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, fmt.Errorf("catalog refresh canceled before start: %w", err)
@@ -249,7 +252,7 @@ func (m *Manager) refresh(ctx context.Context, onObserved func(Observation)) (Sn
 		return Snapshot{}, fmt.Errorf("decode root catalog: %w", err)
 	}
 	if root.Type != stacCatalogType || root.Latest == "" {
-		return Snapshot{}, fmt.Errorf("root catalog has invalid type or latest release")
+		return Snapshot{}, errors.New("root catalog has invalid type or latest release")
 	}
 	if err := validateReleaseName(root.Latest); err != nil {
 		return Snapshot{}, fmt.Errorf("root catalog latest release: %w", err)
@@ -285,7 +288,7 @@ func (m *Manager) refresh(ctx context.Context, onObserved func(Observation)) (Sn
 		return Snapshot{}, fmt.Errorf("decode places catalog: %w", err)
 	}
 	if places.Type != stacCatalogType || places.ID != stacPlacesID {
-		return Snapshot{}, fmt.Errorf("places catalog has invalid identity")
+		return Snapshot{}, errors.New("places catalog has invalid identity")
 	}
 	collectionURL, err := m.findNamedLink(places.Links, stacChildRel, m.options.CollectionID, placesURL)
 	if err != nil {
@@ -375,7 +378,7 @@ func (m *Manager) findNamedLink(links []stacLink, rel, name string, baseURL *url
 
 func (m *Manager) resolveCatalogURL(baseURL *url.URL, rawURL string) (*url.URL, error) {
 	if rawURL == "" {
-		return nil, fmt.Errorf("catalog link is empty")
+		return nil, errors.New("catalog link is empty")
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -390,7 +393,7 @@ func (m *Manager) resolveCatalogURL(baseURL *url.URL, rawURL string) (*url.URL, 
 
 func (m *Manager) validateCollection(collection collectionDocument, collectionURL *url.URL, release string) (Schema, []stacLink, error) {
 	if collection.Type != stacCollectionType || collection.ID != m.options.CollectionID {
-		return Schema{}, nil, fmt.Errorf("collection has invalid identity")
+		return Schema{}, nil, errors.New("collection has invalid identity")
 	}
 	if collection.GeoParquetVersion != "1.1.0" {
 		return Schema{}, nil, fmt.Errorf("collection GeoParquet version %q is unsupported", collection.GeoParquetVersion)
@@ -399,7 +402,7 @@ func (m *Manager) validateCollection(collection collectionDocument, collectionUR
 		return Schema{}, nil, fmt.Errorf("collection primary geometry %q is unsupported", collection.PrimaryGeometry)
 	}
 	if collection.PartitionScheme != "hive" || collection.PartitionFileCount <= 0 || collection.PartitionGlob == "" {
-		return Schema{}, nil, fmt.Errorf("collection partition metadata is invalid")
+		return Schema{}, nil, errors.New("collection partition metadata is invalid")
 	}
 	globURL, err := url.Parse(collection.PartitionGlob)
 	if err != nil {
@@ -410,7 +413,7 @@ func (m *Manager) validateCollection(collection collectionDocument, collectionUR
 	}
 	prefix := placesAssetPrefix(release)
 	if !strings.HasPrefix(globURL.Path, prefix) || !strings.HasSuffix(globURL.Path, stacPartitionGlobTail) || path.Clean(globURL.Path) != globURL.Path {
-		return Schema{}, nil, fmt.Errorf("partition glob is outside the trusted places asset prefix")
+		return Schema{}, nil, errors.New("partition glob is outside the trusted places asset prefix")
 	}
 	columns := make([]Column, 0, len(collection.TableColumns))
 	seen := make(map[string]struct{}, len(collection.TableColumns))
@@ -422,7 +425,7 @@ func (m *Manager) validateCollection(collection collectionDocument, collectionUR
 			return Schema{}, nil, fmt.Errorf("collection repeats column %q", column.Name)
 		}
 		seen[column.Name] = struct{}{}
-		columns = append(columns, Column{Name: column.Name, Nullable: column.Nullable, Type: column.Type})
+		columns = append(columns, Column(column))
 	}
 	for _, field := range m.options.Fields {
 		if _, ok := seen[field]; !ok {
@@ -430,7 +433,7 @@ func (m *Manager) validateCollection(collection collectionDocument, collectionUR
 		}
 	}
 	if len(columns) == 0 {
-		return Schema{}, nil, fmt.Errorf("collection schema has no columns")
+		return Schema{}, nil, errors.New("collection schema has no columns")
 	}
 	itemLinks := make([]stacLink, 0, len(collection.Links))
 	seenItems := make(map[string]struct{})
@@ -513,7 +516,7 @@ func (m *Manager) fetchManifest(ctx context.Context, collectionURL *url.URL, ite
 
 func (m *Manager) assetFromItem(item itemDocument, release string) (Asset, error) {
 	if item.Type != stacFeatureType || item.ID == "" {
-		return Asset{}, fmt.Errorf("item has invalid type or id")
+		return Asset{}, errors.New("item has invalid type or id")
 	}
 	if len(item.BBox) != 4 {
 		return Asset{}, fmt.Errorf("item %q has invalid bbox", item.ID)
@@ -693,7 +696,7 @@ func newRefreshGate() chan struct{} {
 
 func validateTrustedURL(target *url.URL, trustedHost string, requireHTTPS bool) error {
 	if target == nil || target.Host == "" {
-		return fmt.Errorf("URL has no host")
+		return errors.New("URL has no host")
 	}
 	if requireHTTPS && target.Scheme != "https" {
 		return fmt.Errorf("URL scheme %q is not HTTPS", target.Scheme)
@@ -702,14 +705,14 @@ func validateTrustedURL(target *url.URL, trustedHost string, requireHTTPS bool) 
 		return fmt.Errorf("URL host %q is not trusted", target.Host)
 	}
 	if target.User != nil || target.RawQuery != "" || target.Fragment != "" {
-		return fmt.Errorf("URL contains user info, query, or fragment")
+		return errors.New("URL contains user info, query, or fragment")
 	}
 	return nil
 }
 
 func validateFields(fields []string) error {
 	if len(fields) == 0 {
-		return fmt.Errorf("catalog fields must not be empty")
+		return errors.New("catalog fields must not be empty")
 	}
 	seen := make(map[string]struct{}, len(fields))
 	for _, field := range fields {
@@ -744,14 +747,14 @@ func isIdentifier(value string) bool {
 func validateBBox(bbox [4]float64) error {
 	for _, value := range bbox {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return fmt.Errorf("bbox contains a non-finite value")
+			return errors.New("bbox contains a non-finite value")
 		}
 	}
 	if bbox[0] < -180 || bbox[0] > 180 || bbox[2] < -180 || bbox[2] > 180 || bbox[1] < -90 || bbox[1] > 90 || bbox[3] < -90 || bbox[3] > 90 {
-		return fmt.Errorf("bbox is outside longitude/latitude limits")
+		return errors.New("bbox is outside longitude/latitude limits")
 	}
 	if bbox[1] > bbox[3] {
-		return fmt.Errorf("bbox latitude bounds are inverted")
+		return errors.New("bbox latitude bounds are inverted")
 	}
 	return nil
 }
@@ -762,7 +765,7 @@ func validateReleaseName(release string) error {
 	}
 	for _, character := range release {
 		if character < 0x20 || character == 0x7f {
-			return fmt.Errorf("release name contains control characters")
+			return errors.New("release name contains control characters")
 		}
 	}
 	return nil
@@ -775,26 +778,21 @@ func placesAssetPrefix(release string) string {
 func itemIDFromURL(target *url.URL) (string, error) {
 	cleanPath := path.Clean(target.Path)
 	if cleanPath != target.Path {
-		return "", fmt.Errorf("item URL path is not clean")
+		return "", errors.New("item URL path is not clean")
 	}
 	filename := path.Base(cleanPath)
 	if !strings.HasSuffix(filename, ".json") {
-		return "", fmt.Errorf("item URL does not name a JSON document")
+		return "", errors.New("item URL does not name a JSON document")
 	}
 	itemID := strings.TrimSuffix(filename, ".json")
 	if itemID == "" || path.Base(path.Dir(cleanPath)) != itemID {
-		return "", fmt.Errorf("item URL does not use the partition ID path")
+		return "", errors.New("item URL does not use the partition ID path")
 	}
 	return itemID, nil
 }
 
 func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, wanted)
 }
 
 func headerOr(previous, current string) string {

@@ -4,7 +4,7 @@ package worker
 
 import "golang.org/x/sys/unix"
 
-func setFileSizeLimit(maxBytes int64) error {
+var setFileSizeLimit = func(maxBytes int64) error {
 	limit := &unix.Rlimit{
 		Cur: uint64(maxBytes),
 		Max: uint64(maxBytes),

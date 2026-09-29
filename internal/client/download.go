@@ -48,10 +48,10 @@ func DownloadTileResponse(ctx context.Context, response *http.Response, options 
 
 func downloadTileResponse(ctx context.Context, response *http.Response, options DownloadOptions, removeTemporary func(string) error) (result DownloadResult, err error) {
 	if ctx == nil {
-		return DownloadResult{}, fmt.Errorf("download tile: context is nil")
+		return DownloadResult{}, errors.New("download tile: context is nil")
 	}
 	if response == nil || response.Body == nil {
-		return DownloadResult{}, fmt.Errorf("download tile: response body is nil")
+		return DownloadResult{}, errors.New("download tile: response body is nil")
 	}
 	result.StatusCode = response.StatusCode
 	if response.StatusCode == http.StatusNotModified {
@@ -74,20 +74,20 @@ func downloadTileResponse(ctx context.Context, response *http.Response, options 
 	}
 	if err := validateDownloadOptions(options); err != nil {
 		if closeErr := response.Body.Close(); closeErr != nil {
-			return DownloadResult{}, fmt.Errorf("%w; close tile response: %v", err, closeErr)
+			return DownloadResult{}, fmt.Errorf("%w; close tile response: %w", err, closeErr)
 		}
 		return DownloadResult{}, err
 	}
 	metadata, err := validateTileHeaders(response, options)
 	if err != nil {
 		if closeErr := response.Body.Close(); closeErr != nil {
-			return DownloadResult{}, fmt.Errorf("%w; close tile response: %v", err, closeErr)
+			return DownloadResult{}, fmt.Errorf("%w; close tile response: %w", err, closeErr)
 		}
 		return DownloadResult{}, err
 	}
 	if err := rejectExistingDestination(options.Destination, options.Force); err != nil {
 		if closeErr := response.Body.Close(); closeErr != nil {
-			return DownloadResult{}, fmt.Errorf("%w; close tile response: %v", err, closeErr)
+			return DownloadResult{}, fmt.Errorf("%w; close tile response: %w", err, closeErr)
 		}
 		return DownloadResult{}, err
 	}
@@ -95,7 +95,7 @@ func downloadTileResponse(ctx context.Context, response *http.Response, options 
 	temporary, err := os.CreateTemp(parent, "."+filepath.Base(options.Destination)+".partial-*")
 	if err != nil {
 		if closeErr := response.Body.Close(); closeErr != nil {
-			return DownloadResult{}, fmt.Errorf("create temporary tile: %w; close tile response: %v", err, closeErr)
+			return DownloadResult{}, fmt.Errorf("create temporary tile: %w; close tile response: %w", err, closeErr)
 		}
 		return DownloadResult{}, fmt.Errorf("create temporary tile: %w", err)
 	}
@@ -110,7 +110,7 @@ func downloadTileResponse(ctx context.Context, response *http.Response, options 
 				if err == nil {
 					err = fmt.Errorf("close temporary tile: %w", closeErr)
 				} else {
-					err = fmt.Errorf("%w; close temporary tile: %v", err, closeErr)
+					err = fmt.Errorf("%w; close temporary tile: %w", err, closeErr)
 				}
 			}
 		}
@@ -122,7 +122,7 @@ func downloadTileResponse(ctx context.Context, response *http.Response, options 
 				err = fmt.Errorf("remove temporary tile: %w", cleanupErr)
 				return
 			}
-			err = fmt.Errorf("%w; remove temporary tile: %v", err, cleanupErr)
+			err = fmt.Errorf("%w; remove temporary tile: %w", err, cleanupErr)
 		}
 	}()
 
@@ -132,7 +132,7 @@ func downloadTileResponse(ctx context.Context, response *http.Response, options 
 	closeResponseErr := response.Body.Close()
 	if copyErr != nil {
 		if closeResponseErr != nil {
-			return DownloadResult{}, fmt.Errorf("stream tile response: %w; close tile response: %v", copyErr, closeResponseErr)
+			return DownloadResult{}, fmt.Errorf("stream tile response: %w; close tile response: %w", copyErr, closeResponseErr)
 		}
 		return DownloadResult{}, fmt.Errorf("stream tile response: %w", copyErr)
 	}
@@ -204,13 +204,13 @@ func (reader contextReader) Read(value []byte) (int, error) {
 
 func validateDownloadOptions(options DownloadOptions) error {
 	if options.Destination == "" {
-		return fmt.Errorf("download tile: destination must not be empty")
+		return errors.New("download tile: destination must not be empty")
 	}
 	if options.MaxDownloadBytes <= 0 {
 		return fmt.Errorf("download tile: max download bytes must be positive, got %d", options.MaxDownloadBytes)
 	}
 	if options.ExpectedCatalogVersion == "" {
-		return fmt.Errorf("download tile: expected catalog version must not be empty")
+		return errors.New("download tile: expected catalog version must not be empty")
 	}
 	return nil
 }
@@ -223,7 +223,7 @@ func validateTileHeaders(response *http.Response, options DownloadOptions) (tile
 	}
 	contentLength := response.Header.Get("Content-Length")
 	if contentLength == "" {
-		return tileHeaders{}, fmt.Errorf("tile response is missing Content-Length")
+		return tileHeaders{}, errors.New("tile response is missing Content-Length")
 	}
 	length, err := strconv.ParseInt(contentLength, 10, 64)
 	if err != nil || length < 0 {
@@ -296,7 +296,7 @@ func validateParquetMagic(path string) (err error) {
 				err = fmt.Errorf("close temporary Parquet tile: %w", closeErr)
 				return
 			}
-			err = fmt.Errorf("%w; close temporary Parquet tile: %v", err, closeErr)
+			err = fmt.Errorf("%w; close temporary Parquet tile: %w", err, closeErr)
 		}
 	}()
 	magic := make([]byte, 4)
@@ -304,7 +304,7 @@ func validateParquetMagic(path string) (err error) {
 		return fmt.Errorf("read temporary Parquet header: %w", err)
 	}
 	if string(magic) != parquetMagic {
-		return fmt.Errorf("temporary tile has invalid Parquet header")
+		return errors.New("temporary tile has invalid Parquet header")
 	}
 	if _, err := file.Seek(-4, io.SeekEnd); err != nil {
 		return fmt.Errorf("seek temporary Parquet footer: %w", err)
@@ -313,7 +313,7 @@ func validateParquetMagic(path string) (err error) {
 		return fmt.Errorf("read temporary Parquet footer: %w", err)
 	}
 	if string(magic) != parquetMagic {
-		return fmt.Errorf("temporary tile has invalid Parquet footer")
+		return errors.New("temporary tile has invalid Parquet footer")
 	}
 	return nil
 }

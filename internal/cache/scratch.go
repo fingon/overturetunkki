@@ -42,10 +42,10 @@ func NewScratchPool(maxBytes int64) (*ScratchPool, error) {
 
 func (pool *ScratchPool) Reserve(ctx context.Context, bytes int64) (*ScratchReservation, error) {
 	if pool == nil {
-		return nil, fmt.Errorf("reserve scratch: pool is nil")
+		return nil, errors.New("reserve scratch: pool is nil")
 	}
 	if ctx == nil {
-		return nil, fmt.Errorf("reserve scratch: context is nil")
+		return nil, errors.New("reserve scratch: context is nil")
 	}
 	if bytes <= 0 {
 		return nil, fmt.Errorf("reserve scratch: bytes must be positive, got %d", bytes)
@@ -102,7 +102,7 @@ func (pool *ScratchPool) Stats() ScratchStats {
 
 func (pool *ScratchPool) Close() error {
 	if pool == nil {
-		return fmt.Errorf("close scratch: pool is nil")
+		return errors.New("close scratch: pool is nil")
 	}
 	pool.mu.Lock()
 	defer pool.mu.Unlock()

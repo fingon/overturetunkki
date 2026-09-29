@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package httpapi
 
 import (
@@ -16,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/cache"
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/worker"
+	"github.com/fingon/overturetunkki/internal/cache"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
@@ -602,9 +603,9 @@ func testSnapshotRelease(release string) catalog.Snapshot {
 	}
 }
 
-func testCell(t testing.TB) h3.Cell {
-	t.Helper()
+func testCell(tb testing.TB) h3.Cell {
+	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), 9)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	return cell
 }

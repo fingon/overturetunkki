@@ -1,8 +1,10 @@
+//nolint:tagliatelle // HTTP API fields use the documented snake_case schema.
 package client
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,16 +14,17 @@ import (
 )
 
 const (
-	CatalogPath                 = "/v1/catalog"
-	TilePathPrefix              = "/v1/tiles/places/"
-	ContentTypeParquet          = "application/vnd.apache.parquet"
-	ReleaseHeader               = "Overture-Release"
-	CatalogVersionHeader        = "Overture-Catalog-Version"
-	ProjectionHeader            = "Overture-Projection-ID"
-	RequestIDHeader             = "X-Request-ID"
-	RetryAfterHeader            = "Retry-After"
-	DefaultResponseBytes  int64 = 1 << 20
-	DefaultErrorBodyBytes int64 = 64 << 10
+	CatalogPath                    = "/v1/catalog"
+	TilePathPrefix                 = "/v1/tiles/places/"
+	ContentTypeParquet             = "application/vnd.apache.parquet"
+	ReleaseHeader                  = "Overture-Release"
+	CatalogVersionHeader           = "Overture-Catalog-Version"
+	ProjectionHeader               = "Overture-Projection-ID"
+	RequestIDHeader                = "X-Request-ID"
+	RetryAfterHeader               = "Retry-After"
+	DefaultResponseBytes     int64 = 1 << 20
+	DefaultErrorBodyBytes    int64 = 64 << 10
+	httpRequestFailedMessage       = "HTTP request failed"
 )
 
 type CatalogResponse struct {
@@ -68,7 +71,7 @@ type HTTPError struct {
 
 func (err *HTTPError) Error() string {
 	if err == nil {
-		return "HTTP request failed"
+		return httpRequestFailedMessage
 	}
 	message := err.Meta.Status
 	if message == "" {
@@ -88,7 +91,7 @@ func (err *HTTPError) Error() string {
 
 func (err *HTTPError) Diagnostic() string {
 	if err == nil {
-		return "HTTP request failed"
+		return httpRequestFailedMessage
 	}
 	details := make([]string, 0, 4)
 	switch err.Meta.StatusCode {
@@ -141,7 +144,7 @@ func (err *HTTPError) Unwrap() error {
 }
 
 func (client *Client) FetchCatalog(ctx context.Context) (CatalogResponse, ResponseMeta, error) {
-	response, err := client.Request(ctx, http.MethodGet, CatalogPath, nil, nil)
+	response, err := client.Request(ctx, RequestOptions{Method: http.MethodGet, Path: CatalogPath})
 	if err != nil {
 		return CatalogResponse{}, ResponseMeta{}, err
 	}
@@ -176,19 +179,19 @@ func (client *Client) RequestTile(ctx context.Context, cell, catalogVersion, ifN
 		return nil, err
 	}
 	if catalogVersion == "" {
-		return nil, fmt.Errorf("catalog version must not be empty")
+		return nil, errors.New("catalog version must not be empty")
 	}
 	query := url.Values{"catalog_version": []string{catalogVersion}}
 	headers := make(http.Header)
 	if ifNoneMatch != "" {
 		headers.Set("If-None-Match", ifNoneMatch)
 	}
-	return client.Request(ctx, http.MethodGet, TilePathPrefix+parsedCell.String(), query, headers)
+	return client.Request(ctx, RequestOptions{Method: http.MethodGet, Path: TilePathPrefix + parsedCell.String(), Query: query, Headers: headers})
 }
 
 func ParseCell(value string) (h3.Cell, error) {
 	if value == "" {
-		return 0, fmt.Errorf("H3 cell must not be empty")
+		return 0, errors.New("H3 cell must not be empty")
 	}
 	cell := h3.CellFromString(value)
 	if !cell.IsValid() {
@@ -202,7 +205,7 @@ func ParseCell(value string) (h3.Cell, error) {
 
 func ParseHTTPError(response *http.Response, maxBytes int64) error {
 	if response == nil {
-		return fmt.Errorf("parse HTTP error: response is nil")
+		return errors.New("parse HTTP error: response is nil")
 	}
 	meta := responseMeta(response)
 	body, err := ReadBody(response, maxBytes)
@@ -236,13 +239,13 @@ func newHTTPError(meta ResponseMeta, body []byte, cause error) *HTTPError {
 
 func validateCatalogResponse(catalog CatalogResponse) error {
 	if catalog.Release == "" || catalog.CatalogVersion == "" || catalog.ProjectionID == "" {
-		return fmt.Errorf("catalog response is missing release, catalog version, or projection ID")
+		return errors.New("catalog response is missing release, catalog version, or projection ID")
 	}
 	if len(catalog.Fields) == 0 {
-		return fmt.Errorf("catalog response has no fields")
+		return errors.New("catalog response has no fields")
 	}
 	if catalog.MaxTileBytes <= 0 || catalog.MaxTileRows <= 0 {
-		return fmt.Errorf("catalog response has invalid tile limits")
+		return errors.New("catalog response has invalid tile limits")
 	}
 	return nil
 }

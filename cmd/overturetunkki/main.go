@@ -8,18 +8,23 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mstenber/overturetunkki/internal/app"
-	"github.com/mstenber/overturetunkki/internal/config"
-	"github.com/mstenber/overturetunkki/internal/logging"
+	"github.com/fingon/overturetunkki/internal/app"
+	"github.com/fingon/overturetunkki/internal/config"
+	"github.com/fingon/overturetunkki/internal/logging"
 )
 
 func main() {
+	os.Exit(runMain())
+}
+
+func runMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		slog.Error("overture service failed", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(ctx context.Context, args []string) error {

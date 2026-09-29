@@ -9,9 +9,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/geoparquet"
-	"github.com/mstenber/overturetunkki/internal/h3filter"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/geoparquet"
+	"github.com/fingon/overturetunkki/internal/h3filter"
 	"github.com/uber/h3-go/v4"
 )
 
@@ -48,6 +48,23 @@ type PreparedQuery struct {
 	Args []any
 }
 
+type TileBuildRequest struct {
+	Conn       *sql.Conn
+	Plan       QueryPlan
+	Snapshot   catalog.Snapshot
+	MaxRows    int64
+	OutputPath string
+	MaxBytes   int64
+}
+
+type candidateCopyRequest struct {
+	Context    context.Context
+	Conn       *sql.Conn
+	OutputPath string
+	Metadata   []byte
+	MaxBytes   int64
+}
+
 type TooManyRowsError struct {
 	ActualRows int64
 	LimitRows  int64
@@ -73,7 +90,7 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 		return PreparedQuery{}, fmt.Errorf("%w: query plan has no selected columns", ErrInvalidProjection)
 	}
 	if snapshot.Release == "" {
-		return PreparedQuery{}, fmt.Errorf("build candidate query: catalog release is empty")
+		return PreparedQuery{}, errors.New("build candidate query: catalog release is empty")
 	}
 	if snapshot.CollectionID != catalog.DefaultCollectionID {
 		return PreparedQuery{}, fmt.Errorf("build candidate query: catalog collection %q is unsupported", snapshot.CollectionID)
@@ -112,30 +129,36 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 	}, nil
 }
 
-func BuildTile(ctx context.Context, conn *sql.Conn, plan QueryPlan, snapshot catalog.Snapshot, maxRows int64, outputPath string, maxBytes int64) (CopyResult, error) {
+func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error) {
 	if ctx == nil {
-		return CopyResult{}, fmt.Errorf("build tile: context is nil")
+		return CopyResult{}, errors.New("build tile: context is nil")
 	}
-	if conn == nil {
-		return CopyResult{}, fmt.Errorf("build tile: DuckDB connection is nil")
+	if request.Conn == nil {
+		return CopyResult{}, errors.New("build tile: DuckDB connection is nil")
 	}
-	query, err := BuildCandidateQuery(plan, snapshot, maxRows)
+	query, err := BuildCandidateQuery(request.Plan, request.Snapshot, request.MaxRows)
 	if err != nil {
 		return CopyResult{}, err
 	}
-	metadata, err := candidateMetadata(plan)
+	metadata, err := candidateMetadata(request.Plan)
 	if err != nil {
 		return CopyResult{}, err
 	}
-	candidates, err := materializeCandidates(ctx, conn, query, maxRows)
+	candidates, err := materializeCandidates(ctx, request.Conn, query, request.MaxRows)
 	if err != nil {
 		return CopyResult{}, err
 	}
-	copyResult, copyErr := candidates.copy(ctx, conn, outputPath, metadata, maxBytes)
-	dropErr := candidates.drop(ctx, conn)
+	copyResult, copyErr := candidates.copy(candidateCopyRequest{
+		Context:    ctx,
+		Conn:       request.Conn,
+		OutputPath: request.OutputPath,
+		Metadata:   metadata,
+		MaxBytes:   request.MaxBytes,
+	})
+	dropErr := candidates.drop(ctx, request.Conn)
 	if copyErr != nil {
 		if dropErr != nil {
-			return CopyResult{}, fmt.Errorf("%w; cleanup candidates: %v", copyErr, dropErr)
+			return CopyResult{}, fmt.Errorf("%w; cleanup candidates: %w", copyErr, dropErr)
 		}
 		return CopyResult{}, copyErr
 	}
@@ -147,13 +170,13 @@ func BuildTile(ctx context.Context, conn *sql.Conn, plan QueryPlan, snapshot cat
 
 func materializeCandidates(ctx context.Context, conn *sql.Conn, query PreparedQuery, maxRows int64) (candidateRows, error) {
 	if ctx == nil {
-		return candidateRows{}, fmt.Errorf("materialize candidates: context is nil")
+		return candidateRows{}, errors.New("materialize candidates: context is nil")
 	}
 	if conn == nil {
-		return candidateRows{}, fmt.Errorf("materialize candidates: DuckDB connection is nil")
+		return candidateRows{}, errors.New("materialize candidates: DuckDB connection is nil")
 	}
 	if strings.TrimSpace(query.SQL) == "" {
-		return candidateRows{}, fmt.Errorf("materialize candidates: query is empty")
+		return candidateRows{}, errors.New("materialize candidates: query is empty")
 	}
 	if _, err := CandidateRowLimit(maxRows); err != nil {
 		return candidateRows{}, fmt.Errorf("materialize candidates: %w", err)
@@ -175,15 +198,15 @@ func materializeCandidates(ctx context.Context, conn *sql.Conn, query PreparedQu
 	return candidateRows{rowCount: rowCount}, nil
 }
 
-func (rows candidateRows) copy(ctx context.Context, conn *sql.Conn, outputPath string, metadata []byte, maxBytes int64) (CopyResult, error) {
+func (rows candidateRows) copy(request candidateCopyRequest) (CopyResult, error) {
 	if rows.rowCount < 0 {
-		return CopyResult{}, fmt.Errorf("copy candidates: row count is negative")
+		return CopyResult{}, errors.New("copy candidates: row count is negative")
 	}
-	copySQL, err := geoparquet.CopySQL("SELECT * FROM "+candidateTableName, outputPath, metadata)
+	copySQL, err := geoparquet.CopySQL("SELECT * FROM "+candidateTableName, request.OutputPath, request.Metadata)
 	if err != nil {
 		return CopyResult{}, fmt.Errorf("copy candidates: %w", err)
 	}
-	return CopyWithOutputLimit(ctx, conn, copySQL, outputPath, maxBytes)
+	return CopyWithOutputLimit(request.Context, CopyRequest{Conn: request.Conn, Query: copySQL, OutputPath: request.OutputPath, MaxBytes: request.MaxBytes})
 }
 
 func (rows candidateRows) drop(ctx context.Context, conn *sql.Conn) error {
@@ -204,10 +227,10 @@ func candidateMetadata(plan QueryPlan) ([]byte, error) {
 
 func dropCandidateTable(ctx context.Context, conn *sql.Conn) error {
 	if ctx == nil {
-		return fmt.Errorf("drop candidates: context is nil")
+		return errors.New("drop candidates: context is nil")
 	}
 	if conn == nil {
-		return fmt.Errorf("drop candidates: DuckDB connection is nil")
+		return errors.New("drop candidates: DuckDB connection is nil")
 	}
 	if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+candidateTableName); err != nil {
 		return fmt.Errorf("drop candidates: %w", err)
@@ -217,7 +240,7 @@ func dropCandidateTable(ctx context.Context, conn *sql.Conn) error {
 
 func cleanupCandidateTable(ctx context.Context, conn *sql.Conn, cause error) error {
 	if err := dropCandidateTable(ctx, conn); err != nil {
-		return fmt.Errorf("%w; cleanup candidates: %v", cause, err)
+		return fmt.Errorf("%w; cleanup candidates: %w", cause, err)
 	}
 	return cause
 }
@@ -253,7 +276,7 @@ func ParseCanonicalCell(value string) (h3.Cell, error) {
 
 func pinnedAssetURLs(snapshot catalog.Snapshot) ([]string, error) {
 	if len(snapshot.Manifest) == 0 {
-		return nil, fmt.Errorf("build candidate query: catalog manifest is empty")
+		return nil, errors.New("build candidate query: catalog manifest is empty")
 	}
 	assetHost := snapshot.AssetHost
 	if assetHost == "" {

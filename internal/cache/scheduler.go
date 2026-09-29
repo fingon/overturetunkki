@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -37,7 +38,7 @@ type job struct {
 
 func NewScheduler(cache *Cache, options SchedulerOptions) (*Scheduler, error) {
 	if cache == nil {
-		return nil, fmt.Errorf("create cache scheduler: cache is nil")
+		return nil, errors.New("create cache scheduler: cache is nil")
 	}
 	if options.Workers <= 0 {
 		return nil, fmt.Errorf("create cache scheduler: workers must be positive, got %d", options.Workers)
@@ -59,13 +60,13 @@ func NewScheduler(cache *Cache, options SchedulerOptions) (*Scheduler, error) {
 
 func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, build JobFunc) error {
 	if scheduler == nil {
-		return fmt.Errorf("run cache job: scheduler is nil")
+		return errors.New("run cache job: scheduler is nil")
 	}
 	if ctx == nil {
-		return fmt.Errorf("run cache job: context is nil")
+		return errors.New("run cache job: context is nil")
 	}
 	if build == nil {
-		return fmt.Errorf("run cache job: build function is nil")
+		return errors.New("run cache job: build function is nil")
 	}
 	keyDigest, err := key.digest()
 	if err != nil {
@@ -105,7 +106,7 @@ func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, bui
 
 func (scheduler *Scheduler) Close() error {
 	if scheduler == nil {
-		return fmt.Errorf("close cache scheduler: scheduler is nil")
+		return errors.New("close cache scheduler: scheduler is nil")
 	}
 	scheduler.mu.Lock()
 	if scheduler.closed {

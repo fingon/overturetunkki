@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,13 @@ type Options struct {
 	HTTPClient     *http.Client
 	ResponseBytes  int64
 	ErrorBodyBytes int64
+}
+
+type RequestOptions struct {
+	Method  string
+	Path    string
+	Query   url.Values
+	Headers http.Header
 }
 
 type Client struct {
@@ -38,53 +46,53 @@ func New(options Options) (*Client, error) {
 		responseBytes = DefaultResponseBytes
 	}
 	if responseBytes <= 0 {
-		return nil, fmt.Errorf("create HTTP client: response byte limit must be positive")
+		return nil, errors.New("create HTTP client: response byte limit must be positive")
 	}
 	errorBodyBytes := options.ErrorBodyBytes
 	if errorBodyBytes == 0 {
 		errorBodyBytes = DefaultErrorBodyBytes
 	}
 	if errorBodyBytes <= 0 {
-		return nil, fmt.Errorf("create HTTP client: error body byte limit must be positive")
+		return nil, errors.New("create HTTP client: error body byte limit must be positive")
 	}
 	return &Client{baseURL: baseURL, httpClient: httpClient, responseBytes: responseBytes, errorBodyBytes: errorBodyBytes}, nil
 }
 
-func (client *Client) Request(ctx context.Context, method, path string, query url.Values, headers http.Header) (*http.Response, error) {
+func (client *Client) Request(ctx context.Context, options RequestOptions) (*http.Response, error) {
 	if client == nil || client.baseURL == nil || client.httpClient == nil {
-		return nil, fmt.Errorf("request HTTP endpoint: client is nil")
+		return nil, errors.New("request HTTP endpoint: client is nil")
 	}
 	if ctx == nil {
-		return nil, fmt.Errorf("request HTTP endpoint: context is nil")
+		return nil, errors.New("request HTTP endpoint: context is nil")
 	}
-	if method == "" {
-		return nil, fmt.Errorf("request HTTP endpoint: method is empty")
+	if options.Method == "" {
+		return nil, errors.New("request HTTP endpoint: method is empty")
 	}
-	if path == "" || !strings.HasPrefix(path, "/") {
-		return nil, fmt.Errorf("request HTTP endpoint: path must start with slash")
+	if options.Path == "" || !strings.HasPrefix(options.Path, "/") {
+		return nil, errors.New("request HTTP endpoint: path must start with slash")
 	}
 	target := *client.baseURL
-	target.Path = strings.TrimRight(client.baseURL.Path, "/") + path
-	target.RawQuery = query.Encode()
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+	target.Path = strings.TrimRight(client.baseURL.Path, "/") + options.Path
+	target.RawQuery = options.Query.Encode()
+	request, err := http.NewRequestWithContext(ctx, options.Method, target.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create HTTP request: %w", err)
 	}
-	for name, values := range headers {
+	for name, values := range options.Headers {
 		for _, value := range values {
 			request.Header.Add(name, value)
 		}
 	}
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("request %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("request %s %s: %w", options.Method, options.Path, err)
 	}
 	return response, nil
 }
 
 func CloseResponse(response *http.Response) error {
 	if response == nil || response.Body == nil {
-		return fmt.Errorf("close HTTP response: response body is nil")
+		return errors.New("close HTTP response: response body is nil")
 	}
 	if err := response.Body.Close(); err != nil {
 		return fmt.Errorf("close HTTP response body: %w", err)
@@ -94,7 +102,7 @@ func CloseResponse(response *http.Response) error {
 
 func ReadBody(response *http.Response, maxBytes int64) ([]byte, error) {
 	if response == nil || response.Body == nil {
-		return nil, fmt.Errorf("read HTTP response: response body is nil")
+		return nil, errors.New("read HTTP response: response body is nil")
 	}
 	if maxBytes <= 0 {
 		return nil, fmt.Errorf("read HTTP response: byte limit must be positive, got %d", maxBytes)
@@ -103,7 +111,7 @@ func ReadBody(response *http.Response, maxBytes int64) ([]byte, error) {
 	closeErr := response.Body.Close()
 	if readErr != nil {
 		if closeErr != nil {
-			return nil, fmt.Errorf("read HTTP response body: %w; close HTTP response body: %v", readErr, closeErr)
+			return nil, fmt.Errorf("read HTTP response body: %w; close HTTP response body: %w", readErr, closeErr)
 		}
 		return nil, fmt.Errorf("read HTTP response body: %w", readErr)
 	}

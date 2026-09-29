@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package worker
 
 import (
@@ -9,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/geoparquet"
-	"github.com/mstenber/overturetunkki/internal/h3filter"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/geoparquet"
+	"github.com/fingon/overturetunkki/internal/h3filter"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
@@ -374,18 +375,18 @@ func testSnapshot() catalog.Snapshot {
 	}
 }
 
-func testCell(t testing.TB) h3.Cell {
-	t.Helper()
+func testCell(tb testing.TB) h3.Cell {
+	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), 9)
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	return cell
 }
 
-func mustBenchmarkCell(b testing.TB, latitudeDeg, longitudeDeg float64, resolution int) h3.Cell {
-	b.Helper()
+func mustBenchmarkCell(tb testing.TB, latitudeDeg, longitudeDeg float64, resolution int) h3.Cell {
+	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(latitudeDeg, longitudeDeg), resolution)
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	return cell
 }

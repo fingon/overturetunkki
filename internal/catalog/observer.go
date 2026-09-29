@@ -72,20 +72,20 @@ type Generation struct {
 
 func NewObserver(checker Checker, pollInterval time.Duration) (*Observer, error) {
 	if checker == nil {
-		return nil, fmt.Errorf("catalog checker is nil")
+		return nil, errors.New("catalog checker is nil")
 	}
 	if pollInterval <= 0 {
-		return nil, fmt.Errorf("catalog poll interval must be positive")
+		return nil, errors.New("catalog poll interval must be positive")
 	}
 	return &Observer{checker: checker, pollInterval: pollInterval}, nil
 }
 
 func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 	if o == nil {
-		return Snapshot{}, fmt.Errorf("catalog observer is nil")
+		return Snapshot{}, errors.New("catalog observer is nil")
 	}
 	if ctx == nil {
-		return Snapshot{}, fmt.Errorf("catalog observer context is nil")
+		return Snapshot{}, errors.New("catalog observer context is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, fmt.Errorf("catalog observer canceled before start: %w", err)
@@ -99,7 +99,7 @@ func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 		o.state.pending = Observation{}
 		checkContext, cancel := detachedCheckContext(ctx)
 		o.mu.Unlock()
-		go o.runCheck(call, checkContext, cancel)
+		go o.runCheck(checkContext, call, cancel)
 	} else {
 		o.mu.Unlock()
 	}
@@ -117,10 +117,10 @@ func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 
 func (o *Observer) Run(ctx context.Context) error {
 	if o == nil {
-		return fmt.Errorf("catalog observer is nil")
+		return errors.New("catalog observer is nil")
 	}
 	if ctx == nil {
-		return fmt.Errorf("catalog observer context is nil")
+		return errors.New("catalog observer context is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return observerStopError(err)
@@ -160,7 +160,7 @@ func (o *Observer) Run(ctx context.Context) error {
 
 func (o *Observer) State() State {
 	if o == nil {
-		return State{Err: fmt.Errorf("catalog observer is nil")}
+		return State{Err: errors.New("catalog observer is nil")}
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -178,13 +178,13 @@ func (o *Observer) Ready() bool {
 
 func (o *Observer) Current() (Generation, error) {
 	if o == nil {
-		return Generation{}, fmt.Errorf("catalog observer is nil")
+		return Generation{}, errors.New("catalog observer is nil")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if !o.state.ready {
 		if o.state.lastError != nil {
-			return Generation{}, fmt.Errorf("%w: %v", ErrCatalogUnavailable, o.state.lastError)
+			return Generation{}, fmt.Errorf("%w: %w", ErrCatalogUnavailable, o.state.lastError)
 		}
 		return Generation{}, ErrCatalogNotReady
 	}
@@ -195,7 +195,7 @@ func (o *Observer) Current() (Generation, error) {
 	}, nil
 }
 
-func (o *Observer) runCheck(call *observationCall, ctx context.Context, cancel context.CancelFunc) {
+func (o *Observer) runCheck(ctx context.Context, call *observationCall, cancel context.CancelFunc) {
 	defer cancel()
 	var (
 		snapshot Snapshot
@@ -216,7 +216,7 @@ func (o *Observer) observe(observation Observation) {
 	if observation.Release == "" {
 		o.mu.Lock()
 		o.fenceLocked()
-		o.state.lastError = fmt.Errorf("catalog checker reported an empty release")
+		o.state.lastError = errors.New("catalog checker reported an empty release")
 		o.mu.Unlock()
 		return
 	}
@@ -237,34 +237,8 @@ func (o *Observer) finishCheck(call *observationCall, snapshot Snapshot, err err
 	defer o.mu.Unlock()
 	if err == nil {
 		observation := snapshotObservation(snapshot)
-		if observation.Release == "" || observation.CatalogVersion == "" {
-			err = fmt.Errorf("catalog checker returned an incomplete snapshot")
-		}
-		if err == nil {
-			if o.state.pending.Release != "" && observationChanged(o.state.pending, observation) {
-				err = fmt.Errorf("catalog checker observation does not match snapshot")
-			}
-		}
-		if err == nil {
-			if o.state.ready && observationChanged(o.state.identity, observation) {
-				o.fenceLocked()
-			}
-			if !o.state.ready {
-				if o.state.generation == 0 {
-					o.state.generation = 1
-				}
-				generationContext, cancel := context.WithCancel(context.Background())
-				o.state.activeContext = generationContext
-				o.state.cancelActive = cancel
-				o.state.snapshot = cloneSnapshot(snapshot)
-				o.state.identity = observation
-				o.state.ready = true
-			} else {
-				o.state.snapshot = cloneSnapshot(snapshot)
-				o.state.identity = observation
-			}
-			o.state.pending = Observation{}
-			o.state.lastError = nil
+		if err = o.validateObservationLocked(observation); err == nil {
+			o.acceptObservationLocked(snapshot, observation)
 		}
 	}
 	if err != nil {
@@ -277,6 +251,36 @@ func (o *Observer) finishCheck(call *observationCall, snapshot Snapshot, err err
 		o.inFlight = nil
 	}
 	close(call.done)
+}
+
+func (o *Observer) validateObservationLocked(observation Observation) error {
+	switch {
+	case observation.Release == "" || observation.CatalogVersion == "":
+		return errors.New("catalog checker returned an incomplete snapshot")
+	case o.state.pending.Release != "" && observationChanged(o.state.pending, observation):
+		return errors.New("catalog checker observation does not match snapshot")
+	default:
+		return nil
+	}
+}
+
+func (o *Observer) acceptObservationLocked(snapshot Snapshot, observation Observation) {
+	if o.state.ready && observationChanged(o.state.identity, observation) {
+		o.fenceLocked()
+	}
+	if !o.state.ready {
+		if o.state.generation == 0 {
+			o.state.generation = 1
+		}
+		generationContext, cancel := context.WithCancel(context.Background())
+		o.state.activeContext = generationContext
+		o.state.cancelActive = cancel
+		o.state.ready = true
+	}
+	o.state.snapshot = cloneSnapshot(snapshot)
+	o.state.identity = observation
+	o.state.pending = Observation{}
+	o.state.lastError = nil
 }
 
 func (o *Observer) fenceLocked() {

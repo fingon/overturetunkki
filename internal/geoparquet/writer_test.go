@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package geoparquet
 
 import (
@@ -209,8 +210,10 @@ func inspectParquet(path string) (inspection parquetInspection, err error) {
 		return parquetInspection{}, fmt.Errorf("decode GeoParquet metadata from %q: %w", path, err)
 	}
 	inspection.Rows = reader.NumRows()
-	for index := 0; index < fileMetadata.Schema.Root().NumFields(); index++ {
-		inspection.Fields = append(inspection.Fields, fileMetadata.Schema.Root().Field(index).Name())
+	root := fileMetadata.Schema.Root()
+	fieldCount := root.NumFields()
+	for index := range fieldCount {
+		inspection.Fields = append(inspection.Fields, root.Field(index).Name())
 	}
 	namesIndex := fileMetadata.Schema.Root().FieldIndexByName("names")
 	if namesIndex >= 0 {
@@ -234,7 +237,8 @@ func inspectParquet(path string) (inspection parquetInspection, err error) {
 	if reader.NumRowGroups() > 0 {
 		rowGroup := fileMetadata.RowGroup(0)
 		inspection.Zstd = true
-		for columnIndex := 0; columnIndex < rowGroup.NumColumns(); columnIndex++ {
+		columnCount := rowGroup.NumColumns()
+		for columnIndex := range columnCount {
 			column, columnErr := rowGroup.ColumnChunk(columnIndex)
 			if columnErr != nil {
 				return parquetInspection{}, fmt.Errorf("read Parquet column metadata: %w", columnErr)
@@ -268,7 +272,8 @@ func inspectParquet(path string) (inspection parquetInspection, err error) {
 			if !ok {
 				return parquetInspection{}, fmt.Errorf("Arrow geometry column has type %T, want binary", chunk)
 			}
-			for rowIndex := 0; rowIndex < binaryArray.Len(); rowIndex++ {
+			rowCount := binaryArray.Len()
+			for rowIndex := range rowCount {
 				inspection.GeometryWKB = append(inspection.GeometryWKB, append([]byte(nil), binaryArray.Value(rowIndex)...))
 			}
 		}
@@ -343,21 +348,21 @@ func testRepoRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(sourcePath), "..", ".."))
 }
 
-func openDuckDBConnection(t testing.TB) *sql.Conn {
-	t.Helper()
+func openDuckDBConnection(tb testing.TB) *sql.Conn {
+	tb.Helper()
 	db, err := sql.Open("duckdb", "")
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	t.Cleanup(func() { assert.NilError(t, db.Close()) })
+	tb.Cleanup(func() { assert.NilError(tb, db.Close()) })
 	connection, err := db.Conn(context.Background())
-	assert.NilError(t, err)
+	assert.NilError(tb, err)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
-	t.Cleanup(func() { assert.NilError(t, connection.Close()) })
+	tb.Cleanup(func() { assert.NilError(tb, connection.Close()) })
 	return connection
 }

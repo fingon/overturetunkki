@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package client
 
 import (
@@ -96,7 +97,10 @@ func TestRequestTileRejectsInvalidInputs(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := httpClient.RequestTile(context.Background(), test.cell, test.version, "")
+			response, err := httpClient.RequestTile(context.Background(), test.cell, test.version, "")
+			if response != nil {
+				assert.NilError(t, CloseResponse(response))
+			}
 			assert.ErrorContains(t, err, test.message)
 		})
 	}
@@ -115,12 +119,13 @@ func TestHTTPErrorPreservesStructuredBody(t *testing.T) {
 	if err != nil {
 		return
 	}
-	response, err := httpClient.Request(context.Background(), http.MethodGet, "/failure", nil, nil)
+	response, err := httpClient.Request(context.Background(), RequestOptions{Method: http.MethodGet, Path: "/failure"}) //nolint:bodyclose // ParseHTTPError consumes and closes the response body.
 	assert.NilError(t, err)
 	if err != nil {
 		return
 	}
-	httpError, ok := ParseHTTPError(response, DefaultErrorBodyBytes).(*HTTPError)
+	httpError := &HTTPError{}
+	ok := errors.As(ParseHTTPError(response, DefaultErrorBodyBytes), &httpError)
 	assert.Assert(t, ok)
 	if !ok {
 		return

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -39,7 +40,7 @@ func (config Config) NormalizedServerURL() (string, error) {
 
 func parseServerURL(rawURL string) (*url.URL, error) {
 	if rawURL == "" {
-		return nil, fmt.Errorf("server URL must not be empty")
+		return nil, errors.New("server URL must not be empty")
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -49,10 +50,10 @@ func parseServerURL(rawURL string) (*url.URL, error) {
 		return nil, fmt.Errorf("server URL scheme %q is not HTTP(S)", parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return nil, fmt.Errorf("server URL host must not be empty")
+		return nil, errors.New("server URL host must not be empty")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, fmt.Errorf("server URL must not contain user info, query, or fragment")
+		return nil, errors.New("server URL must not contain user info, query, or fragment")
 	}
 	return parsed, nil
 }

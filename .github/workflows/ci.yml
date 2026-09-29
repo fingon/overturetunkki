@@ -62,3 +62,78 @@ jobs:
         run: make smoke
       - name: Test service lifecycle
         run: make container-test
+
+  publish-service-image:
+    name: Build publishable service image (${{ matrix.arch }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [go, containers]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install Podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build service image archive
+        env:
+          SERVICE_IMAGE_REPO: ghcr.io/${{ github.repository }}/service
+        run: >-
+          make service-image
+          TARGET_ARCH=${{ matrix.arch }}
+          SERVICE_IMAGE_REPO="$SERVICE_IMAGE_REPO"
+          SERVICE_IMAGE_TAG=latest
+      - name: Upload service image archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-image-${{ matrix.arch }}
+          path: bin/service.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-service-image-manifest:
+    name: Publish service image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: publish-service-image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Install Podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Download service image archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: service-image-*
+          path: images
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' "$GHCR_TOKEN" |
+            podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish latest multi-platform image
+        env:
+          IMAGE_REPO: ghcr.io/${{ github.repository }}/service
+          LOCAL_IMAGE_REPO: localhost/overturetunkki-service
+        run: |
+          podman load --input images/service-image-amd64/service.tar
+          podman tag "$IMAGE_REPO:latest" "$LOCAL_IMAGE_REPO:amd64"
+          podman load --input images/service-image-arm64/service.tar
+          podman tag "$IMAGE_REPO:latest" "$LOCAL_IMAGE_REPO:arm64"
+          podman manifest create "$LOCAL_IMAGE_REPO:latest"
+          podman manifest add "$LOCAL_IMAGE_REPO:latest" "$LOCAL_IMAGE_REPO:amd64"
+          podman manifest add "$LOCAL_IMAGE_REPO:latest" "$LOCAL_IMAGE_REPO:arm64"
+          podman manifest push --all \
+            "$LOCAL_IMAGE_REPO:latest" "docker://$IMAGE_REPO:latest"

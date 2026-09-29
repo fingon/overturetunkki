@@ -1,3 +1,4 @@
+//nolint:goconst,tagliatelle // Test literals and external-schema fixtures stay readable.
 package catalog
 
 import (
@@ -48,7 +49,7 @@ func newCatalogFixtureServer(t *testing.T) *catalogFixtureServer {
 	fixture.bodies[fmt.Sprintf("/%s/catalog.json", fixtureRelease)] = fixtureFile(t, filepath.Join(fixtureRelease, "catalog.json"))
 	fixture.bodies[fmt.Sprintf("/%s/places/catalog.json", fixtureRelease)] = fixtureFile(t, filepath.Join(fixtureRelease, "places", "catalog.json"))
 	fixture.bodies[fmt.Sprintf("/%s/places/place/collection.json", fixtureRelease)] = fixtureFile(t, filepath.Join(fixtureRelease, "places", "place", "collection.json"))
-	for index := 0; index < 16; index++ {
+	for index := range 16 {
 		partition := fmt.Sprintf("%05d", index)
 		fixture.bodies[fmt.Sprintf("/%s/places/place/%s/%s.json", fixtureRelease, partition, partition)] = fixtureFile(t, filepath.Join(fixtureRelease, "places", "place", partition+".json"))
 	}

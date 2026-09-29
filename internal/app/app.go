@@ -10,15 +10,15 @@ import (
 	"os"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/cache"
-	"github.com/mstenber/overturetunkki/internal/catalog"
-	"github.com/mstenber/overturetunkki/internal/config"
-	"github.com/mstenber/overturetunkki/internal/httpapi"
+	"github.com/fingon/overturetunkki/internal/cache"
+	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/config"
+	"github.com/fingon/overturetunkki/internal/httpapi"
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
 	if ctx == nil {
-		return fmt.Errorf("run context is nil")
+		return errors.New("run context is nil")
 	}
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("validate configuration: %w", err)
@@ -71,7 +71,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		closeErr := tileCache.Close()
 		if closeErr != nil {
-			return fmt.Errorf("create negative cache: %w; close tile cache: %v", err, closeErr)
+			return fmt.Errorf("create negative cache: %w; close tile cache: %w", err, closeErr)
 		}
 		return fmt.Errorf("create negative cache: %w", err)
 	}
@@ -80,7 +80,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 		closeErr := negative.Close()
 		cacheCloseErr := tileCache.Close()
 		if closeErr != nil || cacheCloseErr != nil {
-			return fmt.Errorf("create scratch pool: %w; close negative cache: %v; close tile cache: %v", err, closeErr, cacheCloseErr)
+			return fmt.Errorf("create scratch pool: %w; close negative cache: %w; close tile cache: %w", err, closeErr, cacheCloseErr)
 		}
 		return fmt.Errorf("create scratch pool: %w", err)
 	}
@@ -90,7 +90,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 		scratchCloseErr := scratch.Close()
 		cacheCloseErr := tileCache.Close()
 		if negativeCloseErr != nil || scratchCloseErr != nil || cacheCloseErr != nil {
-			return fmt.Errorf("create tile provider: %w; close negative cache: %v; close scratch: %v; close tile cache: %v", err, negativeCloseErr, scratchCloseErr, cacheCloseErr)
+			return fmt.Errorf("create tile provider: %w; close negative cache: %w; close scratch: %w; close tile cache: %w", err, negativeCloseErr, scratchCloseErr, cacheCloseErr)
 		}
 		return fmt.Errorf("create tile provider: %w", err)
 	}
@@ -106,21 +106,32 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	})
 	if err != nil {
 		if closeErr := provider.Close(); closeErr != nil {
-			return fmt.Errorf("create HTTP server: %w; close tile provider: %v", err, closeErr)
+			return fmt.Errorf("create HTTP server: %w; close tile provider: %w", err, closeErr)
 		}
 		return fmt.Errorf("create HTTP server: %w", err)
 	}
-	return runHTTPService(ctx, cfg, observer, apiServer, provider)
+	return runHTTPService(ctx, httpServiceOptions{Config: cfg, Observer: observer, APIServer: apiServer, Provider: provider})
 }
 
-func runHTTPService(ctx context.Context, cfg config.Config, observer *catalog.Observer, apiServer *httpapi.Server, provider *tileProvider) error {
+type httpServiceOptions struct {
+	Config    config.Config
+	Observer  *catalog.Observer
+	APIServer *httpapi.Server
+	Provider  *tileProvider
+}
+
+func runHTTPService(ctx context.Context, options httpServiceOptions) error {
+	cfg := options.Config
+	observer := options.Observer
+	apiServer := options.APIServer
+	provider := options.Provider
 	serviceContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		closeErr := provider.Close()
 		if closeErr != nil {
-			return fmt.Errorf("listen on %q: %w; close tile provider: %v", cfg.Listen, err, closeErr)
+			return fmt.Errorf("listen on %q: %w; close tile provider: %w", cfg.Listen, err, closeErr)
 		}
 		return fmt.Errorf("listen on %q: %w", cfg.Listen, err)
 	}
@@ -155,7 +166,6 @@ func runHTTPService(ctx context.Context, cfg config.Config, observer *catalog.Ob
 		observerWaitContext, observerWaitCancel := context.WithTimeout(context.Background(), cfg.CatalogTimeout)
 		select {
 		case err := <-observerResult:
-			observerStopped = true
 			if err != nil && ctx.Err() == nil {
 				cause = errors.Join(cause, fmt.Errorf("run catalog observer: %w", err))
 			}

@@ -1,7 +1,9 @@
+//nolint:tagliatelle // GeoParquet defines these JSON metadata names.
 package geoparquet
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -12,6 +14,7 @@ const (
 	GeoParquetVersion  = "1.1.0"
 	GeometryColumnName = "geometry"
 	WKBEncoding        = "WKB"
+	pointGeometryType  = "Point"
 )
 
 type GeoMetadata struct {
@@ -43,7 +46,7 @@ func PointMetadata(minLongitudeDeg, minLatitudeDeg, maxLongitudeDeg, maxLatitude
 			GeometryColumnName: {
 				BBox:          values,
 				Encoding:      WKBEncoding,
-				GeometryTypes: []string{"Point"},
+				GeometryTypes: []string{pointGeometryType},
 			},
 		},
 	}
@@ -56,13 +59,13 @@ func PointMetadata(minLongitudeDeg, minLatitudeDeg, maxLongitudeDeg, maxLatitude
 
 func CopySQL(selectSQL, outputPath string, metadata []byte) (string, error) {
 	if strings.TrimSpace(selectSQL) == "" {
-		return "", fmt.Errorf("GeoParquet COPY query is empty")
+		return "", errors.New("GeoParquet COPY query is empty")
 	}
 	if outputPath == "" {
-		return "", fmt.Errorf("GeoParquet COPY output path is empty")
+		return "", errors.New("GeoParquet COPY output path is empty")
 	}
 	if !json.Valid(metadata) {
-		return "", fmt.Errorf("GeoParquet metadata is not valid JSON")
+		return "", errors.New("GeoParquet metadata is not valid JSON")
 	}
 	quotedPath := strings.ReplaceAll(outputPath, "'", "''")
 	quotedMetadata := strings.ReplaceAll(string(metadata), "'", "''")

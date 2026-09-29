@@ -29,6 +29,13 @@ type CopyResult struct {
 	SizeBytes int64
 }
 
+type CopyRequest struct {
+	Conn       *sql.Conn
+	Query      string
+	OutputPath string
+	MaxBytes   int64
+}
+
 func SetFileSizeLimit(maxBytes int64) error {
 	if maxBytes <= 0 {
 		return fmt.Errorf("file-size limit must be positive, got %d", maxBytes)
@@ -41,10 +48,10 @@ func SetFileSizeLimit(maxBytes int64) error {
 
 func DisableCopySpill(ctx context.Context, conn *sql.Conn) error {
 	if ctx == nil {
-		return fmt.Errorf("disable COPY spill: context is nil")
+		return errors.New("disable COPY spill: context is nil")
 	}
 	if conn == nil {
-		return fmt.Errorf("disable COPY spill: nil DuckDB connection")
+		return errors.New("disable COPY spill: nil DuckDB connection")
 	}
 	statements := []string{
 		"SET temp_directory = ''",
@@ -58,41 +65,41 @@ func DisableCopySpill(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
-func CopyWithOutputLimit(ctx context.Context, conn *sql.Conn, query, outputPath string, maxBytes int64) (CopyResult, error) {
+func CopyWithOutputLimit(ctx context.Context, request CopyRequest) (CopyResult, error) {
 	if ctx == nil {
-		return CopyResult{}, fmt.Errorf("COPY output guard: context is nil")
+		return CopyResult{}, errors.New("COPY output guard: context is nil")
 	}
-	if conn == nil {
-		return CopyResult{}, fmt.Errorf("COPY output guard: nil DuckDB connection")
+	if request.Conn == nil {
+		return CopyResult{}, errors.New("COPY output guard: nil DuckDB connection")
 	}
-	if strings.TrimSpace(query) == "" {
-		return CopyResult{}, fmt.Errorf("COPY output guard: empty query")
+	if strings.TrimSpace(request.Query) == "" {
+		return CopyResult{}, errors.New("COPY output guard: empty query")
 	}
-	if outputPath == "" {
-		return CopyResult{}, fmt.Errorf("COPY output guard: empty output path")
+	if request.OutputPath == "" {
+		return CopyResult{}, errors.New("COPY output guard: empty output path")
 	}
-	if maxBytes <= 0 {
-		return CopyResult{}, fmt.Errorf("COPY output guard: byte limit must be positive, got %d", maxBytes)
-	}
-
-	if err := DisableCopySpill(ctx, conn); err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(err))
-	}
-	if err := SetFileSizeLimit(maxBytes); err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(err))
+	if request.MaxBytes <= 0 {
+		return CopyResult{}, fmt.Errorf("COPY output guard: byte limit must be positive, got %d", request.MaxBytes)
 	}
 
-	if _, err := conn.ExecContext(ctx, query); err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, classifyCopyError(err, maxBytes))
+	if err := DisableCopySpill(ctx, request.Conn); err != nil {
+		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyWorkerError(err))
 	}
-	fileInfo, err := os.Stat(outputPath)
+	if err := SetFileSizeLimit(request.MaxBytes); err != nil {
+		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyWorkerError(err))
+	}
+
+	if _, err := request.Conn.ExecContext(ctx, request.Query); err != nil {
+		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyCopyError(err, request.MaxBytes))
+	}
+	fileInfo, err := os.Stat(request.OutputPath)
 	if err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(fmt.Errorf("stat COPY output %q: %w", outputPath, err)))
+		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyWorkerError(fmt.Errorf("stat COPY output %q: %w", request.OutputPath, err)))
 	}
-	if fileInfo.Size() > maxBytes {
-		return CopyResult{}, cleanupAfterFailure(outputPath, &OutputTooLargeError{
+	if fileInfo.Size() > request.MaxBytes {
+		return CopyResult{}, cleanupAfterFailure(request.OutputPath, &OutputTooLargeError{
 			ActualBytes: fileInfo.Size(),
-			LimitBytes:  maxBytes,
+			LimitBytes:  request.MaxBytes,
 		})
 	}
 	return CopyResult{SizeBytes: fileInfo.Size()}, nil
@@ -100,7 +107,7 @@ func CopyWithOutputLimit(ctx context.Context, conn *sql.Conn, query, outputPath 
 
 func RemoveOutput(path string) error {
 	if path == "" {
-		return fmt.Errorf("remove output: empty path")
+		return errors.New("remove output: empty path")
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove output %q: %w", path, err)
@@ -114,14 +121,14 @@ func CandidateRowLimit(maxRows int64) (int64, error) {
 		return 0, fmt.Errorf("candidate row limit must not be negative, got %d", maxRows)
 	}
 	if maxRows == maxInt64 {
-		return 0, fmt.Errorf("candidate row limit overflows max_rows+1")
+		return 0, errors.New("candidate row limit overflows max_rows+1")
 	}
 	return maxRows + 1, nil
 }
 
 func cleanupAfterFailure(path string, cause error) error {
 	if err := RemoveOutput(path); err != nil {
-		return fmt.Errorf("%w; cleanup failed: %v", cause, err)
+		return fmt.Errorf("%w; cleanup failed: %w", cause, err)
 	}
 	return cause
 }
@@ -130,7 +137,7 @@ func classifyCopyError(err error, maxBytes int64) error {
 	lowerMessage := strings.ToLower(err.Error())
 	if errors.Is(err, syscall.EFBIG) || strings.Contains(lowerMessage, "file size") ||
 		strings.Contains(lowerMessage, "file too large") {
-		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %v", ErrOutputTooLarge, maxBytes, err)
+		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", ErrOutputTooLarge, maxBytes, err)
 	}
 	return classifyWorkerError(fmt.Errorf("DuckDB COPY failed: %w", err))
 }

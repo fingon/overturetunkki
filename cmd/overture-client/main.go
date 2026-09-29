@@ -1,3 +1,4 @@
+//nolint:tagliatelle // CLI JSON output uses the documented snake_case schema.
 package main
 
 import (
@@ -14,14 +15,14 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/mstenber/overturetunkki/internal/client"
-	"github.com/mstenber/overturetunkki/internal/logging"
+	"github.com/fingon/overturetunkki/internal/client"
+	"github.com/fingon/overturetunkki/internal/logging"
 )
 
 type cliConfig struct {
-	ServerURL string        `name:"server-url" env:"OVERTURE_CLIENT_SERVER_URL" default:"http://localhost:8080" help:"HTTP(S) server URL."`
-	Timeout   time.Duration `name:"timeout" env:"OVERTURE_CLIENT_TIMEOUT" default:"60s" help:"Command-wide timeout."`
-	Verbose   bool          `short:"v" env:"OVERTURE_CLIENT_VERBOSE" help:"Enable debug diagnostics."`
+	ServerURL string        `default:"http://localhost:8080" env:"OVERTURE_CLIENT_SERVER_URL" help:"HTTP(S) server URL." name:"server-url"`
+	Timeout   time.Duration `default:"60s" env:"OVERTURE_CLIENT_TIMEOUT" help:"Command-wide timeout." name:"timeout"`
+	Verbose   bool          `env:"OVERTURE_CLIENT_VERBOSE" help:"Enable debug diagnostics." short:"v"`
 
 	Catalog catalogCommand `cmd:"" help:"Fetch catalog metadata."`
 	Tile    tileCommand    `cmd:"" help:"Fetch one H3 tile."`
@@ -31,11 +32,11 @@ type catalogCommand struct{}
 
 type tileCommand struct {
 	Cell             string `arg:"" help:"Canonical H3 cell index."`
-	CatalogVersion   string `name:"catalog-version" help:"Explicit catalog version."`
-	IfNoneMatch      string `name:"if-none-match" help:"ETag for conditional tile testing."`
-	Output           string `name:"output" help:"Destination Parquet file."`
-	Force            bool   `name:"force" help:"Allow replacing an existing destination."`
-	MaxDownloadBytes int64  `name:"max-download-bytes" env:"OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES" default:"67108864" help:"Maximum downloaded response bytes."`
+	CatalogVersion   string `help:"Explicit catalog version." name:"catalog-version"`
+	IfNoneMatch      string `help:"ETag for conditional tile testing." name:"if-none-match"`
+	Output           string `help:"Destination Parquet file." name:"output"`
+	Force            bool   `help:"Allow replacing an existing destination." name:"force"`
+	MaxDownloadBytes int64  `default:"67108864" env:"OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES" help:"Maximum downloaded response bytes." name:"max-download-bytes"`
 }
 
 const (
@@ -60,18 +61,23 @@ func (err *argumentError) Unwrap() error {
 }
 
 func main() {
+	os.Exit(runMain())
+}
+
+func runMain() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
 		code := exitCode(err)
 		slog.Error("overture client failed", "error", diagnostic(err), "exit_code", code)
-		os.Exit(code)
+		return code
 	}
+	return exitSuccess
 }
 
 func run(ctx context.Context, args []string) error {
 	if ctx == nil {
-		return fmt.Errorf("run client context is nil")
+		return errors.New("run client context is nil")
 	}
 	var config cliConfig
 	parser, err := kong.New(
@@ -106,7 +112,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	commandName := strings.Fields(parsed.Command())
 	if len(commandName) == 0 {
-		return markArgumentError(fmt.Errorf("client command is required"))
+		return markArgumentError(errors.New("client command is required"))
 	}
 	switch commandName[0] {
 	case "catalog":
@@ -138,17 +144,17 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 		return fmt.Errorf("tile command canceled: %w", err)
 	}
 	if httpClient == nil {
-		return fmt.Errorf("tile command HTTP client is nil")
+		return errors.New("tile command HTTP client is nil")
 	}
 	cell, err := client.ParseCell(command.Cell)
 	if err != nil {
 		return markArgumentError(err)
 	}
 	if command.Output == "" {
-		return markArgumentError(fmt.Errorf("tile command output is required"))
+		return markArgumentError(errors.New("tile command output is required"))
 	}
 	if command.MaxDownloadBytes <= 0 {
-		return markArgumentError(fmt.Errorf("tile command max download bytes must be positive"))
+		return markArgumentError(errors.New("tile command max download bytes must be positive"))
 	}
 	catalogVersion := command.CatalogVersion
 	expectedProjectionID := ""
@@ -164,7 +170,7 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 			maxDownloadBytes = catalogResponse.MaxTileBytes
 		}
 	}
-	response, err := httpClient.RequestTile(ctx, cell.String(), catalogVersion, command.IfNoneMatch)
+	response, err := httpClient.RequestTile(ctx, cell.String(), catalogVersion, command.IfNoneMatch) //nolint:bodyclose // DownloadTileResponse consumes the response body.
 	if err != nil {
 		return err
 	}
@@ -219,12 +225,10 @@ func exitCode(err error) int {
 	if err == nil {
 		return exitSuccess
 	}
-	var argumentErr *argumentError
-	if errors.As(err, &argumentErr) {
+	if argumentErr, ok := errors.AsType[*argumentError](err); ok && argumentErr != nil {
 		return exitInvalidArguments
 	}
-	var httpErr *client.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*client.HTTPError](err); ok {
 		switch httpErr.Meta.StatusCode {
 		case http.StatusBadRequest:
 			return exitInvalidArguments
@@ -240,8 +244,7 @@ func exitCode(err error) int {
 }
 
 func diagnostic(err error) string {
-	var httpErr *client.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*client.HTTPError](err); ok {
 		return httpErr.Diagnostic()
 	}
 	return err.Error()

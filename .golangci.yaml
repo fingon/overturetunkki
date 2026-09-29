@@ -1,0 +1,114 @@
+version: "2"
+linters:
+  enable:
+    - asasalint
+    - bidichk
+    - bodyclose
+    - durationcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exptostd
+    - goconst
+    - gocheckcompilerdirectives
+    - gocritic
+    - intrange
+    - makezero
+    - misspell
+    - modernize
+    - nestif
+    - nilerr
+    - nilnesserr
+    - nolintlint
+    - perfsprint
+    # - prealloc # performance, but not useful
+    - reassign
+    - revive
+    - sloglint
+    - sqlclosecheck
+    - tagalign
+    - tagliatelle
+    - thelper
+    - tparallel
+    - unconvert
+    - usetesting
+    - wastedassign
+    - whitespace
+  settings:
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+      disable-default-exclusions: true
+    goconst:
+      min-occurrences: 2
+    gocritic:
+      disabled-checks:
+        - captLocal
+    nestif:
+      min-complexity: 7
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: argument-limit
+          arguments: [4]
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+          disabled: true
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+    sloglint:
+      static-msg: true
+    tagalign:
+      align: false
+      sort: true
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          yaml: snake
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

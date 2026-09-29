@@ -1,3 +1,4 @@
+//nolint:goconst // Repeated literals keep independent test cases readable.
 package main
 
 import (
@@ -5,17 +6,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/mstenber/overturetunkki/internal/client"
+	"github.com/fingon/overturetunkki/internal/client"
 	"gotest.tools/v3/assert"
 )
 
@@ -35,7 +38,13 @@ func TestRunDiscoversCatalogForTile(t *testing.T) {
 		case "/v1/tiles/places/" + cell:
 			tileCalls++
 			assert.Equal(t, request.URL.Query().Get("catalog_version"), "2026-09-23.1+sha256:test")
-			writeTileResponse(t, responseWriter, tileBody, "2026-09-23.1", "2026-09-23.1+sha256:test", "sha256:projection", `"sha256:`+hex.EncodeToString(tileDigest[:])+`"`)
+			writeTileResponse(t, responseWriter, tileResponse{
+				body:           tileBody,
+				release:        "2026-09-23.1",
+				catalogVersion: "2026-09-23.1+sha256:test",
+				projectionID:   "sha256:projection",
+				etag:           `"sha256:` + hex.EncodeToString(tileDigest[:]) + `"`,
+			})
 		default:
 			http.NotFound(responseWriter, request)
 		}
@@ -114,16 +123,24 @@ func TestRunTileExplicitVersionDoesNotDiscover(t *testing.T) {
 	assert.DeepEqual(t, actual, original)
 }
 
-func writeTileResponse(t *testing.T, responseWriter http.ResponseWriter, body []byte, release, catalogVersion, projectionID, etag string) {
+type tileResponse struct {
+	body           []byte
+	release        string
+	catalogVersion string
+	projectionID   string
+	etag           string
+}
+
+func writeTileResponse(t *testing.T, responseWriter http.ResponseWriter, response tileResponse) {
 	t.Helper()
 	responseWriter.Header().Set("Content-Type", client.ContentTypeParquet)
-	responseWriter.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	responseWriter.Header().Set(client.ReleaseHeader, release)
-	responseWriter.Header().Set(client.CatalogVersionHeader, catalogVersion)
-	responseWriter.Header().Set(client.ProjectionHeader, projectionID)
-	responseWriter.Header().Set("ETag", etag)
+	responseWriter.Header().Set("Content-Length", strconv.Itoa(len(response.body)))
+	responseWriter.Header().Set(client.ReleaseHeader, response.release)
+	responseWriter.Header().Set(client.CatalogVersionHeader, response.catalogVersion)
+	responseWriter.Header().Set(client.ProjectionHeader, response.projectionID)
+	responseWriter.Header().Set("ETag", response.etag)
 	responseWriter.WriteHeader(http.StatusOK)
-	_, err := responseWriter.Write(body)
+	_, err := responseWriter.Write(response.body)
 	assert.NilError(t, err)
 }
 
@@ -179,7 +196,7 @@ func TestRunTileHTTPFailuresExposeExitCodes(t *testing.T) {
 
 func TestRunTileTimeoutDoesNotPublish(t *testing.T) {
 	cell := "8928308280fffff"
-	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		<-request.Context().Done()
 	}))
 	outputPath := filepath.Join(t.TempDir(), "tile.parquet")
@@ -220,13 +237,13 @@ func TestExitCodeMapsCLIAndHTTPFailures(t *testing.T) {
 		want int
 	}{
 		{name: "success", want: exitSuccess},
-		{name: "invalid arguments", err: markArgumentError(fmt.Errorf("invalid")), want: exitInvalidArguments},
+		{name: "invalid arguments", err: markArgumentError(errors.New("invalid")), want: exitInvalidArguments},
 		{name: "bad request", err: fmt.Errorf("request: %w", &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusBadRequest}}), want: exitInvalidArguments},
 		{name: "catalog changed", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusConflict}}, want: exitCatalogChanged},
 		{name: "tile too large", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusUnprocessableEntity}}, want: exitTileTooLarge},
 		{name: "service unavailable", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusServiceUnavailable}}, want: exitTemporaryFailure},
 		{name: "timeout", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusGatewayTimeout}}, want: exitTemporaryFailure},
-		{name: "unexpected", err: fmt.Errorf("unexpected"), want: exitFailure},
+		{name: "unexpected", err: errors.New("unexpected"), want: exitFailure},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
