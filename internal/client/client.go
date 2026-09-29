@@ -10,13 +10,17 @@ import (
 )
 
 type Options struct {
-	ServerURL  string
-	HTTPClient *http.Client
+	ServerURL      string
+	HTTPClient     *http.Client
+	ResponseBytes  int64
+	ErrorBodyBytes int64
 }
 
 type Client struct {
-	baseURL    *url.URL
-	httpClient *http.Client
+	baseURL        *url.URL
+	httpClient     *http.Client
+	responseBytes  int64
+	errorBodyBytes int64
 }
 
 func New(options Options) (*Client, error) {
@@ -29,7 +33,21 @@ func New(options Options) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	return &Client{baseURL: baseURL, httpClient: httpClient}, nil
+	responseBytes := options.ResponseBytes
+	if responseBytes == 0 {
+		responseBytes = DefaultResponseBytes
+	}
+	if responseBytes <= 0 {
+		return nil, fmt.Errorf("create HTTP client: response byte limit must be positive")
+	}
+	errorBodyBytes := options.ErrorBodyBytes
+	if errorBodyBytes == 0 {
+		errorBodyBytes = DefaultErrorBodyBytes
+	}
+	if errorBodyBytes <= 0 {
+		return nil, fmt.Errorf("create HTTP client: error body byte limit must be positive")
+	}
+	return &Client{baseURL: baseURL, httpClient: httpClient, responseBytes: responseBytes, errorBodyBytes: errorBodyBytes}, nil
 }
 
 func (client *Client) Request(ctx context.Context, method, path string, query url.Values, headers http.Header) (*http.Response, error) {

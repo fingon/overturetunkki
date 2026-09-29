@@ -30,7 +30,7 @@ test:
 build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(SERVICE_BIN) ./cmd/overturetunkki
-	CGO_ENABLED=0 $(GO) build -trimpath -o $(CLIENT_BIN) ./cmd/overture-client
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(CLIENT_BIN) ./cmd/overture-client
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(NATIVE_PROBE_BIN) ./cmd/native-probe
 
 build-linux:

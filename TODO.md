@@ -97,7 +97,7 @@ items below are pending;
   OVERTURE_CLIENT_ environment overrides, configuration validation, command-wide
   cancellation/deadlines, and slog verbose diagnostics. Keep it independent of
   DuckDB and server implementation packages.
-- [ ] Implement catalog and tile commands, automatic catalog discovery, explicit
+- [x] Implement catalog and tile commands, automatic catalog discovery, explicit
   version requests, and If-None-Match testing. Preserve raw failure behavior:
   no automatic retries, catalog replacement, or H3 refinement.
 - [ ] Implement bounded streaming downloads, required-header/version/projection

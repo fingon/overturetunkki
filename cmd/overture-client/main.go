@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,7 +29,9 @@ type cliConfig struct {
 type catalogCommand struct{}
 
 type tileCommand struct {
-	Cell string `arg:"" help:"Canonical H3 cell index."`
+	Cell           string `arg:"" help:"Canonical H3 cell index."`
+	CatalogVersion string `name:"catalog-version" help:"Explicit catalog version."`
+	IfNoneMatch    string `name:"if-none-match" help:"ETag for conditional tile testing."`
 }
 
 func main() {
@@ -74,7 +78,11 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	switch parsed.Command() {
+	commandName := strings.Fields(parsed.Command())
+	if len(commandName) == 0 {
+		return fmt.Errorf("client command is required")
+	}
+	switch commandName[0] {
 	case "catalog":
 		return runCatalog(commandContext, httpClient)
 	case "tile":
@@ -88,7 +96,14 @@ func runCatalog(ctx context.Context, httpClient *client.Client) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("catalog command canceled: %w", err)
 	}
-	return errors.New("catalog command is not implemented")
+	catalogResponse, _, err := httpClient.FetchCatalog(ctx)
+	if err != nil {
+		return fmt.Errorf("fetch catalog: %w", err)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(catalogResponse); err != nil {
+		return fmt.Errorf("write catalog result: %w", err)
+	}
+	return nil
 }
 
 func runTile(ctx context.Context, httpClient *client.Client, command tileCommand) error {
@@ -98,8 +113,41 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 	if httpClient == nil {
 		return fmt.Errorf("tile command HTTP client is nil")
 	}
-	if command.Cell == "" {
-		return fmt.Errorf("tile command cell is empty")
+	cell, err := client.ParseCell(command.Cell)
+	if err != nil {
+		return err
 	}
-	return errors.New("tile command is not implemented")
+	catalogVersion := command.CatalogVersion
+	if catalogVersion == "" {
+		catalogResponse, _, err := httpClient.FetchCatalog(ctx)
+		if err != nil {
+			return fmt.Errorf("discover catalog for tile: %w", err)
+		}
+		catalogVersion = catalogResponse.CatalogVersion
+	}
+	response, err := httpClient.RequestTile(ctx, cell.String(), catalogVersion, command.IfNoneMatch)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotModified {
+		return client.ParseHTTPError(response, client.DefaultErrorBodyBytes)
+	}
+	if err := client.CloseResponse(response); err != nil {
+		return fmt.Errorf("close tile response: %w", err)
+	}
+	result := struct {
+		Cell           string `json:"cell"`
+		CatalogVersion string `json:"catalog_version"`
+		Status         int    `json:"status"`
+		ETag           string `json:"etag,omitempty"`
+	}{
+		Cell:           cell.String(),
+		CatalogVersion: catalogVersion,
+		Status:         response.StatusCode,
+		ETag:           response.Header.Get("ETag"),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return fmt.Errorf("write tile result: %w", err)
+	}
+	return nil
 }
