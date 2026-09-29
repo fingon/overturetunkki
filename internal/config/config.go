@@ -43,6 +43,8 @@ type Config struct {
 	Mode                 Mode          `name:"mode" env:"OVERTURE_MODE" default:"supervisor" enum:"supervisor,worker" help:"Process mode."`
 	Listen               string        `name:"listen" env:"OVERTURE_LISTEN" default:":8080" help:"HTTP listen address."`
 	CatalogURL           string        `name:"catalog-url" env:"OVERTURE_CATALOG_URL" default:"https://stac.overturemaps.org/catalog.json" help:"Trusted STAC catalog endpoint."`
+	CatalogHost          string        `name:"catalog-host" env:"OVERTURE_CATALOG_HOST" default:"stac.overturemaps.org" help:"Trusted STAC catalog host."`
+	AssetHost            string        `name:"asset-host" env:"OVERTURE_ASSET_HOST" default:"overturemaps-us-west-2.s3.us-west-2.amazonaws.com" help:"Trusted places asset host."`
 	CatalogPollInterval  time.Duration `name:"catalog-poll-interval" env:"OVERTURE_CATALOG_POLL_INTERVAL" default:"1m" help:"Additional idle catalog refresh interval."`
 	CatalogTimeout       time.Duration `name:"catalog-timeout" env:"OVERTURE_CATALOG_TIMEOUT" default:"10s" help:"Complete catalog freshness-check deadline."`
 	Fields               []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,basic_category" sep:"," help:"Comma-separated top-level output fields."`
@@ -111,6 +113,12 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateCatalogURL(c.CatalogURL); err != nil {
+		return err
+	}
+	if err := validateTrustedHost(c.CatalogHost, "catalog-host"); err != nil {
+		return err
+	}
+	if err := validateTrustedHost(c.AssetHost, "asset-host"); err != nil {
 		return err
 	}
 	positiveDurations := []struct {
@@ -220,6 +228,8 @@ func normalize(c Config) Config {
 	c.Fields = fields
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.CatalogURL = strings.TrimSpace(c.CatalogURL)
+	c.CatalogHost = strings.TrimSpace(c.CatalogHost)
+	c.AssetHost = strings.TrimSpace(c.AssetHost)
 	c.CacheDir = strings.TrimSpace(c.CacheDir)
 	return c
 }
@@ -252,6 +262,17 @@ func validateCatalogURL(rawURL string) error {
 	}
 	if parsed.User != nil {
 		return fmt.Errorf("catalog-url must not contain user information")
+	}
+	return nil
+}
+
+func validateTrustedHost(host, name string) error {
+	if host == "" {
+		return fmt.Errorf("%s must not be empty", name)
+	}
+	parsed, err := url.Parse("https://" + host)
+	if err != nil || parsed.Host != host || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s %q is invalid", name, host)
 	}
 	return nil
 }

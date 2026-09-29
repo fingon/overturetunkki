@@ -74,6 +74,7 @@ type Snapshot struct {
 	CatalogVersion string
 	ProjectionID   string
 	CollectionID   string
+	AssetHost      string
 	Manifest       []Asset
 	Schema         Schema
 }
@@ -334,6 +335,7 @@ func (m *Manager) refresh(ctx context.Context, onObserved func(Observation)) (Sn
 		CatalogVersion: catalogVersion,
 		ProjectionID:   projectionID,
 		CollectionID:   m.options.CollectionID,
+		AssetHost:      m.options.AssetHost,
 		Manifest:       manifest,
 		Schema:         schema,
 	}, nil

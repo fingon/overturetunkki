@@ -1,2 +1,3 @@
 /bin/
 cmd/native-probe/kodata/extensions/**/*.duckdb_extension
+cmd/overturetunkki/kodata/extensions/**/*.duckdb_extension

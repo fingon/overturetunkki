@@ -53,6 +53,13 @@ type Tile struct {
 	Path      string
 	SizeBytes int64
 	Digest    string
+	Reader    TileReader
+}
+
+type TileReader interface {
+	io.Reader
+	io.Closer
+	Stat() (os.FileInfo, error)
 }
 
 type Options struct {
@@ -388,11 +395,13 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	}
 	latest, err := server.refresh(request.Context())
 	if err != nil {
+		closeTileReader(request, tile)
 		slog.Error("refresh catalog before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: "catalog_unavailable", Message: "catalog is unavailable", Retryable: true})
 		return
 	}
 	if latest.CatalogVersion != snapshot.CatalogVersion || latest.Release != snapshot.Release {
+		closeTileReader(request, tile)
 		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: "catalog_changed", Message: "catalog changed before response", Release: latest.Release, CatalogVersion: latest.CatalogVersion})
 		return
@@ -402,15 +411,20 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 
 func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request *http.Request, snapshot catalog.Snapshot, tile Tile) {
 	if tile.Path == "" || tile.SizeBytes <= 0 || tile.Digest == "" || strings.ContainsAny(tile.Digest, "\"\r\n") {
+		closeTileReader(request, tile)
 		slog.Error("tile metadata is invalid", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "size_bytes", tile.SizeBytes)
 		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile metadata is invalid"})
 		return
 	}
-	file, err := os.Open(tile.Path)
-	if err != nil {
-		slog.Error("open tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
-		writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile cannot be opened"})
-		return
+	file := tile.Reader
+	if file == nil {
+		openedFile, err := os.Open(tile.Path)
+		if err != nil {
+			slog.Error("open tile response file", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
+			writeError(responseWriter, http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile cannot be opened"})
+			return
+		}
+		file = openedFile
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
@@ -459,6 +473,15 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 	responseWriter.WriteHeader(http.StatusOK)
 	if _, err := io.CopyN(responseWriter, file, tile.SizeBytes); err != nil {
 		slog.Error("stream tile response", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
+	}
+}
+
+func closeTileReader(request *http.Request, tile Tile) {
+	if tile.Reader == nil {
+		return
+	}
+	if err := tile.Reader.Close(); err != nil {
+		slog.Error("close tile reader", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
 	}
 }
 
@@ -527,9 +550,9 @@ func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorR
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "compressed_bytes", "tile exceeds the compressed byte limit")
 	case errors.Is(err, worker.ErrTooManyRows):
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "rows", "tile exceeds the row limit")
-	case errors.Is(err, cache.ErrCapacityUnavailable):
+	case errors.Is(err, cache.ErrCapacityUnavailable), errors.Is(err, cache.ErrQueueFull), errors.Is(err, worker.ErrOutOfMemory):
 		return http.StatusServiceUnavailable, errorResponse{Code: capacityUnavailableCode, Message: capacityUnavailableMessage, Retryable: true}
-	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, worker.ErrTileCanceled), errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, errorResponse{Code: "tile_timeout", Message: "tile build timed out", Retryable: true}
 	case errors.Is(err, worker.ErrUpstream):
 		return http.StatusServiceUnavailable, errorResponse{Code: "upstream_unavailable", Message: "tile source is unavailable", Retryable: true}

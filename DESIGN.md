@@ -6,8 +6,9 @@ This document specifies the implementation. The native dependency, image build,
 H3 filtering, worker cell/projection validation and bounded candidate query,
 worker runtime/output validation, cache ownership/admission and keyed job
 scheduling, the HTTP endpoint contract, GeoParquet writer compatibility, typed
-command configuration, catalog validation, and catalog observation gates are
-implemented; service wiring and the CLI remain under construction.
+command configuration, catalog validation, catalog observation, service wiring,
+and the opt-in container harness are implemented; the CLI remains under
+construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -37,10 +38,12 @@ DuckDB; invalid coordinates and cells are not silently discarded.
 
 One container owns one writable cache directory and an exclusive process lock.
 The Go supervisor handles HTTP, catalog discovery, cache accounting, and work
-admission. A bounded pool of isolated worker processes, launched from the same
-binary, embeds DuckDB through `github.com/duckdb/duckdb-go/v2`. Workers perform
-S3 reads and `COPY`; process isolation provides enforceable output limits and
-cancellation without interrupting unrelated queries.
+admission. A bounded scheduler launches one isolated worker process per admitted
+build from the same binary and embeds DuckDB through
+`github.com/duckdb/duckdb-go/v2`. Workers perform S3 reads and `COPY`; process
+isolation provides enforceable output limits and cancellation without
+interrupting unrelated queries. A dead worker affects only its build; the next
+admission starts a fresh process.
 
 Use `net/http`, `log/slog`, and `github.com/alecthomas/kong`. Configuration is
 parsed directly into typed configuration structs with environment overrides.
@@ -456,10 +459,12 @@ The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
 `cmd/overturetunkki` now provides the supervisor and worker process modes. The
-supervisor mode is the default and starts the serialized catalog observer; both
-modes use the same typed configuration and remain signal-cancellable while
-their HTTP and DuckDB job loops are added. All flags have `OVERTURE_`-prefixed
-environment equivalents, and `-v` sets the default `slog` level to debug.
+supervisor mode is the default and owns the catalog observer, HTTP server, disk
+cache, bounded scheduler, and isolated workers. A worker process receives one
+bounded JSON request over standard input, writes its complete tile into the
+supervisor's staging volume, and returns typed failure metadata over standard
+output. All flags have `OVERTURE_`-prefixed environment equivalents, and `-v`
+sets the default `slog` level to debug.
 
 These defaults are starting points to validate with representative POIs.
 
@@ -467,6 +472,8 @@ These defaults are starting points to validate with representative POIs.
 | --- | --- | --- |
 | `--listen` | `:8080` | HTTP address. |
 | `--catalog-url` | `https://stac.overturemaps.org/catalog.json` | Trusted catalog endpoint. |
+| `--catalog-host` | `stac.overturemaps.org` | Exact trusted catalog host, including an optional test port. |
+| `--asset-host` | `overturemaps-us-west-2.s3.us-west-2.amazonaws.com` | Exact trusted places asset host, including an optional test port. |
 | `--catalog-poll-interval` | `1m` | Additional idle refresh. |
 | `--catalog-timeout` | `10s` | Deadline for a complete freshness check. |
 | `--fields` | `id,geometry,names,basic_category` | Output projection. |
@@ -497,11 +504,16 @@ changes/check failures, cache hits/misses, negative hits, eviction,
 bytes/reservations, workers/queue, latency, cancellation, and size rejection.
 Avoid H3 cells or release IDs as unbounded metric labels.
 
-The `Makefile` exposes `lint`, `test`, `build`, `build-linux`, `image`, `smoke`,
-and `hooks` targets. `lint` runs `prek run --all-files`, including the pinned
-standard hooks, `gofmt`, and `go vet`; tests remain a separate target.
-`build-linux` uses the pinned Go container toolchain for Linux CGO artifacts. The
-current image and smoke targets exercise the bundled native dependency probe.
+The `Makefile` exposes `lint`, `test`, `build`, `build-linux`, `image`,
+`service-image`, `container-test`, `smoke`, and `hooks` targets. `lint` runs
+`prek run --all-files`, including the pinned standard hooks, `gofmt`, and
+`go vet`; tests remain a separate target. `build-linux` uses the pinned Go
+container toolchain for Linux CGO artifacts. `image` and `smoke` exercise the
+bundled native dependency probe. `service-image` packages the same bundled
+extensions with the HTTP service. `container-test` is opt-in and runs a local
+TLS STAC/asset fixture against the service image with a read-only root,
+writable bounded cache volume, concurrent requests, conditional responses,
+release rollover, catalog and asset outages, worker replacement, and restart.
 The pre-commit hook is installed with `make hooks`.
 
 Pin Go 1.27, ko, the DuckDB Go driver/core, H3, extensions, and runtime image.
@@ -530,7 +542,8 @@ Overture/source attribution links in catalog responses and deployment docs.
 Provide Makefile targets for lint (`prek run --all-files`), test, build, image,
 and container smoke tests. Enable prek hooks. Use table-driven Go tests with
 `gotest.tools/v3/assert` and fixtures/goldens under `testdata/`. Run lint, tests,
-and build for implementation changes; container smoke tests gate image changes.
+and build for implementation changes; the opt-in `container-test` target gates
+service-image changes without requiring live S3.
 
 Required acceptance cases include release rollover during a hit/build/stream,
 failed upstream checks, schema incompatibility without stale fallback, exact

@@ -70,6 +70,16 @@ type testProvider struct {
 	onGet func()
 }
 
+type trackingTileReader struct {
+	*os.File
+	closes int
+}
+
+func (reader *trackingTileReader) Close() error {
+	reader.closes++
+	return reader.File.Close()
+}
+
 type blockingProvider struct {
 	started chan struct{}
 	release chan struct{}
@@ -231,7 +241,13 @@ func TestServerRejectsRolloverOnConditionalTileHit(t *testing.T) {
 	oldSnapshot := testSnapshot()
 	newSnapshot := testSnapshotRelease("2026-09-30.1")
 	observer := &testObserver{snapshot: oldSnapshot}
-	provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])}}
+	file, err := os.Open(path)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	reader := &trackingTileReader{File: file}
+	provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:]), Reader: reader}}
 	provider.onGet = func() { observer.setSnapshot(newSnapshot) }
 	server, err := New(testOptions(observer, provider))
 	assert.NilError(t, err)
@@ -251,6 +267,7 @@ func TestServerRejectsRolloverOnConditionalTileHit(t *testing.T) {
 	assert.Equal(t, response.Code, "catalog_changed")
 	assert.Equal(t, response.CatalogVersion, newSnapshot.CatalogVersion)
 	assert.Equal(t, provider.callCount(), 1)
+	assert.Equal(t, reader.closes, 1)
 }
 
 func TestServerRejectsRolloverDuringTileBuildBeforeHeaders(t *testing.T) {
@@ -447,7 +464,10 @@ func TestServerMapsTileFailuresAndCatalogReadiness(t *testing.T) {
 		{name: "too large", err: worker.ErrOutputTooLarge, status: http.StatusUnprocessableEntity, code: "tile_too_large"},
 		{name: "too many rows", err: worker.ErrTooManyRows, status: http.StatusUnprocessableEntity, code: "tile_too_large"},
 		{name: "capacity", err: cache.ErrCapacityUnavailable, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
+		{name: "queue full", err: cache.ErrQueueFull, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
+		{name: "out of memory", err: worker.ErrOutOfMemory, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
 		{name: "timeout", err: worker.ErrTileTimeout, status: http.StatusGatewayTimeout, code: "tile_timeout"},
+		{name: "canceled", err: worker.ErrTileCanceled, status: http.StatusGatewayTimeout, code: "tile_timeout"},
 		{name: "upstream", err: worker.ErrUpstream, status: http.StatusServiceUnavailable, code: "upstream_unavailable"},
 	}
 	for _, test := range cases {

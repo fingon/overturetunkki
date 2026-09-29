@@ -87,7 +87,7 @@ items below are pending;
   deduplication, version replacement, and refresh after session resume.
 - [x] Add request IDs, structured error logs, bounded-cardinality metrics,
   backpressure/Retry-After, slow-reader deadlines, and graceful shutdown.
-- [ ] Exercise the complete container with writable volume limits and read-only
+- [x] Exercise the complete container with writable volume limits and read-only
   root, an independent GeoParquet reader, concurrent clients, release rollover,
   upstream outage, worker death, and restart. Keep live S3 tests opt-in.
 

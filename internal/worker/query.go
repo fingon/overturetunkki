@@ -255,6 +255,10 @@ func pinnedAssetURLs(snapshot catalog.Snapshot) ([]string, error) {
 	if len(snapshot.Manifest) == 0 {
 		return nil, fmt.Errorf("build candidate query: catalog manifest is empty")
 	}
+	assetHost := snapshot.AssetHost
+	if assetHost == "" {
+		assetHost = catalog.DefaultAssetHost
+	}
 	prefix := fmt.Sprintf("/release/%s/theme=%s/type=%s/", snapshot.Release, placesTheme, placesType)
 	assetURLs := make([]string, 0, len(snapshot.Manifest))
 	seen := make(map[string]struct{}, len(snapshot.Manifest))
@@ -263,7 +267,7 @@ func pinnedAssetURLs(snapshot catalog.Snapshot) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("validate manifest asset %d: %w", index, err)
 		}
-		if parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, catalog.DefaultAssetHost) || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		if parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, assetHost) || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return nil, fmt.Errorf("validate manifest asset %d: URL is not a trusted HTTPS asset", index)
 		}
 		assetName := path.Base(parsed.Path)

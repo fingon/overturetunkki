@@ -5,9 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"time"
 
+	"github.com/mstenber/overturetunkki/internal/cache"
 	"github.com/mstenber/overturetunkki/internal/catalog"
 	"github.com/mstenber/overturetunkki/internal/config"
+	"github.com/mstenber/overturetunkki/internal/httpapi"
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
@@ -31,11 +37,16 @@ func Run(ctx context.Context, cfg config.Config) error {
 }
 
 func runSupervisor(ctx context.Context, cfg config.Config) error {
+	if err := ctx.Err(); err != nil {
+		return waitForShutdown(ctx, config.ModeSupervisor)
+	}
 	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount)
 	manager, err := catalog.New(catalog.Options{
-		CatalogURL: cfg.CatalogURL,
-		Fields:     cfg.Fields,
-		Timeout:    cfg.CatalogTimeout,
+		CatalogURL:  cfg.CatalogURL,
+		CatalogHost: cfg.CatalogHost,
+		AssetHost:   cfg.AssetHost,
+		Fields:      cfg.Fields,
+		Timeout:     cfg.CatalogTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("create catalog manager: %w", err)
@@ -44,10 +55,143 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create catalog observer: %w", err)
 	}
-	return observer.Run(ctx)
+	workerCount, err := positiveInt(cfg.WorkerCount, "worker count")
+	if err != nil {
+		return err
+	}
+	negativeCacheEntries, err := positiveInt(cfg.NegativeCacheEntries, "negative cache entries")
+	if err != nil {
+		return err
+	}
+	tileCache, err := cache.New(cache.Options{Root: cfg.CacheDir, MaxBytes: cfg.CacheMaxBytes, MaxEntries: cfg.CacheMaxEntries})
+	if err != nil {
+		return fmt.Errorf("create tile cache: %w", err)
+	}
+	negative, err := cache.NewNegativeCache(negativeCacheEntries, cfg.NegativeCacheTTL)
+	if err != nil {
+		closeErr := tileCache.Close()
+		if closeErr != nil {
+			return fmt.Errorf("create negative cache: %w; close tile cache: %v", err, closeErr)
+		}
+		return fmt.Errorf("create negative cache: %w", err)
+	}
+	scratch, err := cache.NewScratchPool(cfg.ScratchMaxBytes)
+	if err != nil {
+		closeErr := negative.Close()
+		cacheCloseErr := tileCache.Close()
+		if closeErr != nil || cacheCloseErr != nil {
+			return fmt.Errorf("create scratch pool: %w; close negative cache: %v; close tile cache: %v", err, closeErr, cacheCloseErr)
+		}
+		return fmt.Errorf("create scratch pool: %w", err)
+	}
+	provider, err := newTileProvider(cfg, tileCache, negative, scratch)
+	if err != nil {
+		negativeCloseErr := negative.Close()
+		scratchCloseErr := scratch.Close()
+		cacheCloseErr := tileCache.Close()
+		if negativeCloseErr != nil || scratchCloseErr != nil || cacheCloseErr != nil {
+			return fmt.Errorf("create tile provider: %w; close negative cache: %v; close scratch: %v; close tile cache: %v", err, negativeCloseErr, scratchCloseErr, cacheCloseErr)
+		}
+		return fmt.Errorf("create tile provider: %w", err)
+	}
+	apiServer, err := httpapi.New(httpapi.Options{
+		Observer:        observer,
+		Provider:        provider,
+		Fields:          cfg.Fields,
+		MaxTileBytes:    cfg.MaxTileBytes,
+		MaxTileRows:     cfg.MaxTileRows,
+		TileConcurrency: workerCount,
+		WriteTimeout:    cfg.WriteTimeout,
+		AttributionURL:  []string{"https://overturemaps.org"},
+	})
+	if err != nil {
+		if closeErr := provider.Close(); closeErr != nil {
+			return fmt.Errorf("create HTTP server: %w; close tile provider: %v", err, closeErr)
+		}
+		return fmt.Errorf("create HTTP server: %w", err)
+	}
+	return runHTTPService(ctx, cfg, observer, apiServer, provider)
+}
+
+func runHTTPService(ctx context.Context, cfg config.Config, observer *catalog.Observer, apiServer *httpapi.Server, provider *tileProvider) error {
+	serviceContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	listener, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		closeErr := provider.Close()
+		if closeErr != nil {
+			return fmt.Errorf("listen on %q: %w; close tile provider: %v", cfg.Listen, err, closeErr)
+		}
+		return fmt.Errorf("listen on %q: %w", cfg.Listen, err)
+	}
+	httpServer := &http.Server{Handler: apiServer}
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- httpServer.Serve(listener) }()
+	observerResult := make(chan error, 1)
+	go func() { observerResult <- observer.Run(serviceContext) }()
+	var cause error
+	observerStopped := false
+	select {
+	case err := <-serveResult:
+		cancel()
+		if !errors.Is(err, http.ErrServerClosed) {
+			cause = fmt.Errorf("serve HTTP: %w", err)
+		}
+	case err := <-observerResult:
+		observerStopped = true
+		if err != nil && ctx.Err() == nil {
+			cause = fmt.Errorf("run catalog observer: %w", err)
+		}
+		cancel()
+	case <-ctx.Done():
+		cancel()
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			cause = fmt.Errorf("supervisor context: %w", ctx.Err())
+		}
+	}
+	shutdownErr := shutdownHTTPService(apiServer, httpServer, cfg.WriteTimeout)
+	cancel()
+	if !observerStopped {
+		observerWaitContext, observerWaitCancel := context.WithTimeout(context.Background(), cfg.CatalogTimeout)
+		select {
+		case err := <-observerResult:
+			observerStopped = true
+			if err != nil && ctx.Err() == nil {
+				cause = errors.Join(cause, fmt.Errorf("run catalog observer: %w", err))
+			}
+		case <-observerWaitContext.Done():
+			cause = errors.Join(cause, fmt.Errorf("wait for catalog observer: %w", observerWaitContext.Err()))
+		}
+		observerWaitCancel()
+	}
+	providerErr := provider.Close()
+	if shutdownErr != nil {
+		cause = errors.Join(cause, shutdownErr)
+	}
+	if providerErr != nil {
+		cause = errors.Join(cause, providerErr)
+	}
+	if cause != nil {
+		return cause
+	}
+	return nil
+}
+
+func shutdownHTTPService(apiServer *httpapi.Server, httpServer *http.Server, timeout time.Duration) error {
+	shutdownContext, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	apiErr := apiServer.Shutdown(shutdownContext)
+	httpErr := httpServer.Shutdown(shutdownContext)
+	if apiErr != nil || httpErr != nil {
+		return errors.Join(apiErr, httpErr)
+	}
+	return nil
 }
 
 func runWorker(ctx context.Context, cfg config.Config) error {
+	if os.Getenv(workerProtocolEnv) == workerProtocolValue {
+		return runWorkerProtocol(ctx)
+	}
 	slog.Info("worker mode started", "worker_threads", cfg.WorkerThreads, "worker_memory_bytes", cfg.WorkerMemoryBytes)
 	return waitForShutdown(ctx, config.ModeWorker)
 }

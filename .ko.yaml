@@ -3,6 +3,9 @@ defaultEnv:
 - CGO_ENABLED=1
 - GOOS=linux
 builds:
+- id: overturetunkki
+  dir: .
+  main: ./cmd/overturetunkki
 - id: native-probe
   dir: .
   main: ./cmd/native-probe

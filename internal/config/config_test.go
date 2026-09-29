@@ -17,6 +17,8 @@ func TestParseDefaults(t *testing.T) {
 	assert.Equal(t, cfg.Mode, ModeSupervisor)
 	assert.Equal(t, cfg.Listen, DefaultListen)
 	assert.Equal(t, cfg.CatalogURL, DefaultCatalogURL)
+	assert.Equal(t, cfg.CatalogHost, "stac.overturemaps.org")
+	assert.Equal(t, cfg.AssetHost, "overturemaps-us-west-2.s3.us-west-2.amazonaws.com")
 	assert.Equal(t, cfg.CatalogPollInterval, DefaultCatalogPollInterval)
 	assert.Equal(t, cfg.CatalogTimeout, DefaultCatalogTimeout)
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names", "basic_category"})
@@ -42,6 +44,8 @@ func TestParseCommandLineOverrides(t *testing.T) {
 		"--mode=worker",
 		"--listen=127.0.0.1:9090",
 		"--catalog-url=http://localhost:8081/catalog.json",
+		"--catalog-host=localhost:8081",
+		"--asset-host=localhost:8081",
 		"--catalog-poll-interval=2m",
 		"--catalog-timeout=11s",
 		"--fields=id,geometry,names",
@@ -68,6 +72,8 @@ func TestParseCommandLineOverrides(t *testing.T) {
 	assert.Equal(t, cfg.Mode, ModeWorker)
 	assert.Equal(t, cfg.Listen, "127.0.0.1:9090")
 	assert.Equal(t, cfg.CatalogURL, "http://localhost:8081/catalog.json")
+	assert.Equal(t, cfg.CatalogHost, "localhost:8081")
+	assert.Equal(t, cfg.AssetHost, "localhost:8081")
 	assert.Equal(t, cfg.CatalogPollInterval, 2*time.Minute)
 	assert.Equal(t, cfg.CatalogTimeout, 11*time.Second)
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names"})
@@ -142,6 +148,7 @@ func TestValidate(t *testing.T) {
 		{name: "invalid listen port", mutate: func(cfg *Config) { cfg.Listen = ":0" }, message: "nonzero port"},
 		{name: "invalid listen range", mutate: func(cfg *Config) { cfg.Listen = ":65536" }, message: "1 through 65535"},
 		{name: "invalid catalog scheme", mutate: func(cfg *Config) { cfg.CatalogURL = "ftp://example.com/catalog.json" }, message: "HTTP(S)"},
+		{name: "invalid catalog host", mutate: func(cfg *Config) { cfg.CatalogHost = "https://example.com" }, message: "catalog-host"},
 		{name: "empty cache directory", mutate: func(cfg *Config) { cfg.CacheDir = "" }, message: "cache-dir"},
 		{name: "relative cache directory", mutate: func(cfg *Config) { cfg.CacheDir = "cache" }, message: "absolute"},
 		{name: "nonpositive limit", mutate: func(cfg *Config) { cfg.MaxTileBytes = 0 }, message: "max-tile-bytes"},

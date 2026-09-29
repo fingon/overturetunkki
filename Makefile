@@ -12,8 +12,11 @@ NATIVE_PROBE_BIN := $(BIN_DIR)/native-probe
 IMAGE_REPO ?= overturetunkki/native-probe
 IMAGE_TAG ?= dev
 IMAGE_REF := $(IMAGE_REPO):$(IMAGE_TAG)
+SERVICE_IMAGE_REPO ?= overturetunkki/service
+SERVICE_IMAGE_TAG ?= dev
+SERVICE_IMAGE_REF := $(SERVICE_IMAGE_REPO):$(SERVICE_IMAGE_TAG)
 
-.PHONY: all lint test build build-linux fetch-extensions image smoke hooks clean
+.PHONY: all lint test build build-linux fetch-extensions image service-image container-test smoke hooks clean
 
 all: test
 
@@ -40,6 +43,12 @@ fetch-extensions:
 
 image: fetch-extensions
 	KO_DOCKER_REPO=$(IMAGE_REPO) $(KO) build --local --bare --tags $(IMAGE_TAG) ./cmd/native-probe
+
+service-image: fetch-extensions
+	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --local --bare --tags $(SERVICE_IMAGE_TAG) ./cmd/overturetunkki
+
+container-test: service-image
+	OVERTURE_CONTAINER_TEST=1 OVERTURE_SERVICE_IMAGE=$(SERVICE_IMAGE_REF) $(GO) test ./integration -run '^TestContainerLifecycle$$' -count=1
 
 smoke: image
 	$(DOCKER) run --rm --network=none --read-only --cap-drop=ALL \

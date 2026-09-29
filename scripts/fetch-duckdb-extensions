@@ -24,8 +24,11 @@ arm64)
 	;;
 esac
 
-output_directory="$repository_directory/cmd/native-probe/kodata/extensions/v$DUCKDB_VERSION/$duckdb_platform"
-mkdir -p "$output_directory"
+output_directories=(
+	"$repository_directory/cmd/native-probe/kodata/extensions/v$DUCKDB_VERSION/$duckdb_platform"
+	"$repository_directory/cmd/overturetunkki/kodata/extensions/v$DUCKDB_VERSION/$duckdb_platform"
+)
+mkdir -p "${output_directories[@]}"
 temporary_directory=$(mktemp -d)
 trap 'rm -rf "$temporary_directory"' EXIT
 
@@ -33,13 +36,15 @@ download_extension() {
 	local extension_name=$1
 	local expected_checksum=$2
 	local archive_path="$temporary_directory/$extension_name.duckdb_extension.gz"
-	local output_path="$output_directory/$extension_name.duckdb_extension"
+	local output_path="$temporary_directory/$extension_name.duckdb_extension"
 	local url="https://extensions.duckdb.org/v$DUCKDB_VERSION/$duckdb_platform/$extension_name.duckdb_extension.gz"
 
 	curl --fail --location --proto '=https' --tlsv1.3 --retry 3 --output "$archive_path" "$url"
 	printf '%s  %s\n' "$expected_checksum" "$archive_path" | sha256sum --check --strict
-	gzip --decompress --stdout "$archive_path" > "$output_path.tmp"
-	mv -- "$output_path.tmp" "$output_path"
+	gzip --decompress --stdout "$archive_path" > "$output_path"
+	for output_directory in "${output_directories[@]}"; do
+		cp -- "$output_path" "$output_directory/$extension_name.duckdb_extension"
+	done
 }
 
 download_extension httpfs "$httpfs_checksum"

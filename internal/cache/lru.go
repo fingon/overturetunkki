@@ -366,6 +366,18 @@ type Reader struct {
 	closeErr  error
 }
 
+func (reader *Reader) Entry() (Entry, error) {
+	if reader == nil || reader.cache == nil || reader.entry == nil {
+		return Entry{}, fmt.Errorf("get cache reader entry: reader is nil")
+	}
+	reader.cache.mu.Lock()
+	defer reader.cache.mu.Unlock()
+	if reader.cache.closed {
+		return Entry{}, ErrCacheClosed
+	}
+	return reader.entry.Entry, nil
+}
+
 func (reader *Reader) Read(bytes []byte) (int, error) {
 	return reader.file.Read(bytes)
 }
