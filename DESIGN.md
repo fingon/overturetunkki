@@ -3,8 +3,8 @@
 ## Status and scope
 
 This document specifies the implementation. The native dependency, image build,
-H3 filtering, and worker output-limit gates are implemented; the HTTP service
-and CLI remain under construction.
+H3 filtering, worker output-limit, and GeoParquet writer compatibility gates are
+implemented; the HTTP service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -276,11 +276,18 @@ materialization but does not guarantee cheap S3 scans or early completion.
 
 For admitted rows, use DuckDB `COPY (SELECT <projection> FROM candidate)` to a
 single staging file with `FORMAT PARQUET, COMPRESSION ZSTD`. Do not split output
-into parts. Row order is unspecified; the ETag hashes the actual file. Pin the
-writer to GeoParquet 1.1-compatible WKB output, including valid `geo` metadata,
-primary geometry column, Point geometry type, and WGS84 longitude/latitude CRS
-semantics. Verify with an independent reader, including zero rows and nested
-fields; plain Parquet containing WKB without metadata is insufficient.
+into parts. Row order is unspecified; the ETag hashes the actual file. Use
+`internal/geoparquet` to project geometry to WKB `BLOB` data (the production
+query uses `ST_AsWKB`) and inject exactly one GeoParquet 1.1 `geo` metadata
+value. The pinned DuckDB native `GEOMETRY` export currently writes GeoParquet
+1.0 metadata, so native geometry columns must not be copied directly for this
+output contract. The metadata declares the primary geometry column, Point
+geometry type, WKB encoding, and WGS84 longitude/latitude semantics; omitting
+`crs` selects the GeoParquet 1.1 default OGC:CRS84. Verify with Apache Arrow's
+independent reader, including zero rows, zstd compression, raw WKB bytes, and
+nested fields. Deterministic files are committed under
+`testdata/geoparquet/`; plain Parquet containing WKB without metadata is
+insufficient.
 
 Set Linux `RLIMIT_FSIZE` in the isolated worker to `max_tile_bytes` before COPY.
 The `internal/worker` output guard applies that limit, catches `EFBIG`-style

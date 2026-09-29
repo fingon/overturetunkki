@@ -7,8 +7,8 @@ guidance, and a bounded disk LRU cache. A Go CLI testing client will inspect
 catalog versions, download tiles, and exercise API error handling.
 
 **Status:** native DuckDB/H3 build, ko image, exact H3 UDF, conservative bbox
-pruning, and worker output-limit gates implemented; server and client
-implementation are in progress.
+pruning, worker output limits, and GeoParquet 1.1 writer compatibility are
+implemented; server and client implementation are in progress.
 
 The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses

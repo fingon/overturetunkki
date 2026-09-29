@@ -1,8 +1,9 @@
 # Implementation backlog
 
 The repository contains the design and the completed native dependency build,
-H3 filtering, and worker output-limit gates. Remaining items below are pending;
-[DESIGN.md](DESIGN.md) defines the intended behavior.
+H3 filtering, worker output-limit, and GeoParquet writer compatibility gates.
+Remaining items below are pending; [DESIGN.md](DESIGN.md) defines the intended
+behavior.
 
 ## 1. Resolve implementation gates
 
@@ -20,7 +21,7 @@ H3 filtering, and worker output-limit gates. Remaining items below are pending;
   SIGXFSZ handling, and cleanup. Verify bounded candidate materialization and
   disabling COPY-phase spill. No serving implementation ships without a hard
   output-size guard; resolve native integration failures explicitly.
-- [ ] Confirm pinned DuckDB can write GeoParquet 1.1-compatible WKB with zstd,
+- [x] Confirm pinned DuckDB can write GeoParquet 1.1-compatible WKB with zstd,
   correct CRS/geo metadata, nested selected fields, and empty results. Validate
   with an independent reader and store fixture files under testdata/.
 
