@@ -2,6 +2,7 @@ package geoparquet
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,4 +49,11 @@ func TestValidateFileRejectsSizeAndSchemaMismatches(t *testing.T) {
 	_, err = ValidateFile(path, []string{"id", GeometryColumnName}, 1024*1024)
 	assert.Assert(t, errors.Is(err, ErrInvalidGeoParquet))
 	assert.ErrorContains(t, err, "top-level fields")
+}
+
+func TestValidateFileRejectsCorruptInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt.parquet")
+	assert.NilError(t, os.WriteFile(path, []byte("not parquet"), 0o600))
+	_, err := ValidateFile(path, []string{"id", GeometryColumnName}, 1024)
+	assert.Assert(t, errors.Is(err, ErrInvalidGeoParquet))
 }

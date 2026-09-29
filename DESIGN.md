@@ -356,6 +356,13 @@ Deadlines, DuckDB memory limits, and bounded concurrency also apply. If the
 worker hard-limit prototype fails, resolve it before implementing serving; do
 not replace it with an unbounded COPY followed only by stat.
 
+Deterministic worker benchmarks cover dense-city and sparse-region query
+planning without contacting S3. Any live upstream benchmark must report the
+manifest asset bytes, rows examined, S3 transfer, query latency, COPY latency,
+and whether rejection was caused by rows or compressed bytes. Neither the
+deterministic benchmark nor a live result promises constant-time rejection or
+constant S3 transfer.
+
 ## Disk LRU and concurrency
 
 Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.

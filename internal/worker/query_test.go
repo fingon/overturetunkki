@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mstenber/overturetunkki/internal/catalog"
 	"github.com/mstenber/overturetunkki/internal/geoparquet"
+	"github.com/mstenber/overturetunkki/internal/h3filter"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
@@ -196,6 +198,127 @@ func TestMaterializeCandidatesUsesOnlyTheConfiguredRowAllowance(t *testing.T) {
 	assert.Equal(t, count, int64(2))
 }
 
+func TestMaterializeCandidatesPreservesEmptyNullAndNestedValues(t *testing.T) {
+	connection := openDuckDBConnection(t)
+	emptyQuery := PreparedQuery{SQL: "SELECT 1::BIGINT AS id, CAST(NULL AS BLOB) AS geometry WHERE false"}
+	empty, err := materializeCandidates(context.Background(), connection, emptyQuery, 0)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { assert.NilError(t, empty.drop(context.Background(), connection)) })
+	assert.Equal(t, empty.rowCount, int64(0))
+
+	nestedQuery := PreparedQuery{SQL: "SELECT * FROM (VALUES ('poi-1', NULL::VARCHAR, struct_pack(primary_name := 'Cafe'), [1, 2]::INTEGER[])) AS source(id, optional_value, names, scores)"}
+	nested, err := materializeCandidates(context.Background(), connection, nestedQuery, 1)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { assert.NilError(t, nested.drop(context.Background(), connection)) })
+	var id, primaryName string
+	var optionalIsNull bool
+	var scoreCount int64
+	err = connection.QueryRowContext(
+		context.Background(),
+		"SELECT id, optional_value IS NULL, names.primary_name, len(scores) FROM "+candidateTableName,
+	).Scan(&id, &optionalIsNull, &primaryName, &scoreCount)
+	assert.NilError(t, err)
+	assert.Equal(t, id, "poi-1")
+	assert.Assert(t, optionalIsNull)
+	assert.Equal(t, primaryName, "Cafe")
+	assert.Equal(t, scoreCount, int64(2))
+}
+
+func TestMaterializeCandidatesHonorsCancellationAndSourceErrors(t *testing.T) {
+	connection := openDuckDBConnection(t)
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := materializeCandidates(canceledContext, connection, PreparedQuery{SQL: "SELECT 1"}, 1)
+	assert.Assert(t, errors.Is(err, context.Canceled), err)
+
+	missingPath := filepath.Join(t.TempDir(), "missing.parquet")
+	_, err = materializeCandidates(context.Background(), connection, PreparedQuery{
+		SQL:  "SELECT * FROM read_parquet(?)",
+		Args: []any{missingPath},
+	}, 1)
+	assert.Assert(t, err != nil)
+	assert.Assert(t, errors.Is(classifyWorkerError(err), ErrUpstream), err)
+}
+
+func TestBuildQueryPlanCoversH3EdgeCells(t *testing.T) {
+	pentagons, err := h3.Pentagons(3)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	polar, err := h3.LatLngToCell(h3.NewLatLng(89, 45), 7)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	edgeCells := []struct {
+		name string
+		cell h3.Cell
+	}{
+		{name: "pentagon", cell: pentagons[0]},
+		{name: "polar", cell: polar},
+	}
+	for resolution := 1; resolution <= h3.MaxResolution && len(edgeCells) < 3; resolution++ {
+		for longitudeDeg := 179.9; longitudeDeg <= 180; longitudeDeg += 0.01 {
+			cell, cellErr := h3.LatLngToCell(h3.NewLatLng(0, longitudeDeg), resolution)
+			assert.NilError(t, cellErr)
+			if cellErr != nil {
+				continue
+			}
+			bounds, boundsErr := h3filter.CellBounds(cell)
+			assert.NilError(t, boundsErr)
+			if boundsErr == nil && len(bounds.LongitudeIntervals) == 2 {
+				edgeCells = append(edgeCells, struct {
+					name string
+					cell h3.Cell
+				}{name: "antimeridian", cell: cell})
+				break
+			}
+		}
+	}
+	assert.Equal(t, len(edgeCells), 3)
+	for _, edgeCell := range edgeCells {
+		t.Run(edgeCell.name, func(t *testing.T) {
+			plan, planErr := BuildQueryPlan(TileRequest{Cell: edgeCell.cell.String()}, []string{"id", "geometry", "names"}, testSnapshot().Schema)
+			assert.NilError(t, planErr)
+			if planErr != nil {
+				return
+			}
+			_, queryErr := BuildCandidateQuery(plan, testSnapshot(), 10)
+			assert.NilError(t, queryErr)
+		})
+	}
+}
+
+func BenchmarkBuildCandidateQueryDenseAndSparse(b *testing.B) {
+	cases := []struct {
+		name string
+		cell h3.Cell
+	}{
+		{name: "dense_city", cell: testCell(b)},
+		{name: "sparse_pole", cell: mustBenchmarkCell(b, 89, 45, 3)},
+	}
+	for _, test := range cases {
+		b.Run(test.name, func(b *testing.B) {
+			plan, err := BuildQueryPlan(TileRequest{Cell: test.cell.String()}, []string{"id", "geometry", "names"}, testSnapshot().Schema)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for range b.N {
+				if _, err := BuildCandidateQuery(plan, testSnapshot(), 1000); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestCandidateMetadataUsesConservativeCellBounds(t *testing.T) {
 	plan, err := BuildQueryPlan(TileRequest{Cell: testCell(t).String()}, []string{"id", "geometry"}, testSnapshot().Schema)
 	assert.NilError(t, err)
@@ -255,5 +378,14 @@ func testCell(t testing.TB) h3.Cell {
 	t.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), 9)
 	assert.NilError(t, err)
+	return cell
+}
+
+func mustBenchmarkCell(b testing.TB, latitudeDeg, longitudeDeg float64, resolution int) h3.Cell {
+	b.Helper()
+	cell, err := h3.LatLngToCell(h3.NewLatLng(latitudeDeg, longitudeDeg), resolution)
+	if err != nil {
+		b.Fatal(err)
+	}
 	return cell
 }

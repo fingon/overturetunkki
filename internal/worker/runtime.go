@@ -174,7 +174,7 @@ func classifyWorkerError(err error) error {
 		return fmt.Errorf("%w: %v", ErrOutOfMemory, err)
 	case strings.Contains(lowerMessage, "no space left"), strings.Contains(lowerMessage, "disk full"), strings.Contains(lowerMessage, "file system"):
 		return fmt.Errorf("%w: %v", ErrDiskFailure, err)
-	case strings.Contains(lowerMessage, "s3"), strings.Contains(lowerMessage, "httpfs"), strings.Contains(lowerMessage, "http status"), strings.Contains(lowerMessage, "remote file"):
+	case strings.Contains(lowerMessage, "s3"), strings.Contains(lowerMessage, "httpfs"), strings.Contains(lowerMessage, "http status"), strings.Contains(lowerMessage, "remote file"), strings.Contains(lowerMessage, "no files found"), strings.Contains(lowerMessage, "read_parquet"):
 		return fmt.Errorf("%w: %v", ErrUpstream, err)
 	default:
 		return err

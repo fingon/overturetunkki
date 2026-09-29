@@ -57,7 +57,7 @@ and catalog observation. Remaining items below are pending;
 - [x] Apply worker memory/thread/deadline settings, scratch allocations, and
   output limits. Distinguish size errors, disk failures, OOM, timeout, and S3
   errors. Validate final footer/schema/size and calculate content digest.
-- [ ] Test empty cells, field typing/nulls, nested columns, H3 refinement edge
+- [x] Test empty cells, field typing/nulls, nested columns, H3 refinement edge
   cases, oversized single rows, row caps, byte caps, cancellation, corrupt input,
   and source failures. Benchmark dense cities and sparse regions; document S3
   transfer and latency rather than promising constant-time size rejection.
