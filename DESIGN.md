@@ -4,9 +4,10 @@
 
 This document specifies the implementation. The native dependency, image build,
 H3 filtering, worker cell/projection validation and bounded candidate query,
-worker runtime/output validation, GeoParquet writer compatibility, typed
-command configuration, catalog validation, and catalog observation gates are
-implemented; the HTTP service and CLI remain under construction.
+worker runtime/output validation, cache ownership/admission and keyed job
+scheduling, GeoParquet writer compatibility, typed command configuration,
+catalog validation, and catalog observation gates are implemented; the HTTP
+service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -364,6 +365,13 @@ deterministic benchmark nor a live result promises constant-time rejection or
 constant S3 transfer.
 
 ## Disk LRU and concurrency
+
+`internal/cache` owns the cache root with a nonblocking OS lock, derives final
+and staging paths from a SHA-256 cache key, and accounts byte/entry reservations
+under one mutex. Its keyed scheduler bounds the worker queue, coalesces callers
+for one key, detaches canceled callers, cancels abandoned jobs, and releases
+reservations after build cleanup. LRU publication, persistent sidecars, and
+restart reconciliation remain below.
 
 Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.
 The size policy hashes byte/row limits, preventing reuse of outdated rejection
