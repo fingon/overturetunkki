@@ -7,6 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/uber/h3-go/v4 v4.5.0
+	gotest.tools/v3 v3.5.2
 )
 
 require (
@@ -20,6 +21,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
+	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

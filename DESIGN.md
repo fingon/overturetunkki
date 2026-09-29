@@ -2,8 +2,9 @@
 
 ## Status and scope
 
-This document specifies the implementation. The native dependency and image
-build gate is implemented; the HTTP service and CLI remain under construction.
+This document specifies the implementation. The native dependency, image build,
+and H3 filtering gates are implemented; the HTTP service and CLI remain under
+construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -21,6 +22,13 @@ DuckDB extension layout. The ko runtime is the digest-pinned
 certificates, and a non-root user. The native Linux arm64 prototype was built
 and executed with no network and a read-only filesystem; amd64 remains the
 required CI image gate.
+
+The `internal/h3filter` package registers `h3_cell_contains(latitude,
+longitude, requested_cell)` as a DuckDB chunk scalar UDF. It accepts explicit
+`DOUBLE`, `DOUBLE`, and `UBIGINT` inputs, preserves DuckDB's default NULL-in/
+NULL-out behavior, and applies the pinned H3 `LatLngToCell` operation at the
+requested cell's resolution. Registration and execution errors are returned to
+DuckDB; invalid coordinates and cells are not silently discarded.
 
 ## Architecture
 
@@ -205,15 +213,35 @@ testing tool; the server image need not contain it.
 
 A POI belongs to a requested cell exactly when
 `latLngToCell(latitude, longitude, requested_resolution) == requested_cell`.
-Use a pinned H3 implementation, exposed through a DuckDB scalar UDF registered
-by the worker. Verify vectorized performance before accepting this integration.
-Keep longitude/latitude order explicit at the geometry-to-H3 boundary.
+The pinned implementation is exposed through the worker's DuckDB scalar UDF;
+the callback uses DuckDB's chunk executor and keeps latitude/longitude order
+explicit at the geometry-to-H3 boundary.
 
 Use conservative cell bounds to push predicates into Overture `bbox` columns
 before exact H3 evaluation. Account for curved edges, pentagons, poles, and the
 antimeridian; split wrapped longitude intervals. Where conservative bounds
 cannot be proved, scan a broader region rather than drop features. Bounds are
-an optimization and never the membership rule.
+an optimization and never the membership rule. Ordinary single-face cells use
+a spherical-cap envelope around the H3 center, expanded by the greatest
+center-to-vertex distance, one greatest boundary-edge distance, and a floating-
+point margin. Pentagon cells, cells spanning multiple icosahedron faces, and
+pole-crossing caps use a global longitude range or a global envelope. The
+generated DuckDB predicate also keeps NULL and malformed source bboxes as
+candidates.
+
+The table-driven integration test compares selected IDs from pruned and
+unpruned DuckDB queries over 50,000 deterministic point bboxes plus centers and
+boundary vertices for ordinary, pentagon, polar, and antimeridian cells. It
+also covers wrapped and NULL bboxes. Run the performance comparison with:
+
+```text
+go test ./internal/h3filter -run '^$' -bench BenchmarkCellMembershipPruning -benchtime=1x
+```
+
+One arm64 run took about 23.5 ms unpruned versus 2.1 ms pruned and reduced the
+candidate count from 50,000 to 5 for the benchmark cell. These timings are
+machine-specific; the candidate-count metric and equality test are the gate,
+not a latency promise.
 
 [H3 hierarchy](https://h3geo.org/docs/) has approximate geometric containment.
 Clients refining an oversized cell must cover their viewport or original cell

@@ -1,7 +1,7 @@
 # Implementation backlog
 
 The repository contains the design and the completed native dependency build
-gate. Remaining items below are pending;
+and H3 filtering gates. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -12,7 +12,7 @@ gate. Remaining items below are pending;
 - [x] Inspect the live STAC hierarchy and record fixtures for latest discovery,
   places manifest resolution, conditional validators, asset identity, and schema.
   Confirm immutable release assumptions and canonical version hashing.
-- [ ] Prove the DuckDB H3 scalar UDF integration and performance. Implement and
+- [x] Prove the DuckDB H3 scalar UDF integration and performance. Implement and
   compare conservative bbox pruning against unpruned exact membership at cell
   boundaries, pentagons, poles, and the antimeridian.
 - [ ] Prove isolated-worker RLIMIT_FSIZE behavior for DuckDB COPY, including
