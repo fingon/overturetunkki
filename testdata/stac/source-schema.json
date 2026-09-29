@@ -1,0 +1,160 @@
+{
+  "duckdb": {
+    "columns": [
+      {
+        "name": "id",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "geometry",
+        "nullable": "YES",
+        "type": "GEOMETRY('OGC:CRS84')"
+      },
+      {
+        "name": "confidence",
+        "nullable": "YES",
+        "type": "DOUBLE"
+      },
+      {
+        "name": "websites",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "emails",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "socials",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "phones",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "brand",
+        "nullable": "YES",
+        "type": "STRUCT(wikidata VARCHAR, \"names\" STRUCT(\"primary\" VARCHAR, common MAP(VARCHAR, VARCHAR), rules STRUCT(variant VARCHAR, \"language\" VARCHAR, perspectives STRUCT(\"mode\" VARCHAR, countries VARCHAR[]), \"value\" VARCHAR, \"between\" DOUBLE[], side VARCHAR)[]))"
+      },
+      {
+        "name": "addresses",
+        "nullable": "YES",
+        "type": "STRUCT(freeform VARCHAR, locality VARCHAR, postcode VARCHAR, region VARCHAR, country VARCHAR)[]"
+      },
+      {
+        "name": "names",
+        "nullable": "YES",
+        "type": "STRUCT(\"primary\" VARCHAR, common MAP(VARCHAR, VARCHAR), rules STRUCT(variant VARCHAR, \"language\" VARCHAR, perspectives STRUCT(\"mode\" VARCHAR, countries VARCHAR[]), \"value\" VARCHAR, \"between\" DOUBLE[], side VARCHAR)[])"
+      },
+      {
+        "name": "sources",
+        "nullable": "YES",
+        "type": "STRUCT(property VARCHAR, dataset VARCHAR, license VARCHAR, record_id VARCHAR, update_time VARCHAR, confidence DOUBLE, \"between\" DOUBLE[], provider VARCHAR, resource VARCHAR, \"version\" VARCHAR)[]"
+      },
+      {
+        "name": "operating_status",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "basic_category",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "taxonomy",
+        "nullable": "YES",
+        "type": "STRUCT(\"primary\" VARCHAR, hierarchy VARCHAR[], alternates VARCHAR[])"
+      },
+      {
+        "name": "version",
+        "nullable": "YES",
+        "type": "INTEGER"
+      },
+      {
+        "name": "bbox",
+        "nullable": "YES",
+        "type": "STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE)"
+      }
+    ],
+    "geo_metadata": {
+      "columns": {
+        "geometry": {
+          "bbox": [
+            -179.99806213378906,
+            -84.9901123046875,
+            -76.5058364868164,
+            28.64617919921875
+          ],
+          "covering": {
+            "bbox": {
+              "xmax": [
+                "bbox",
+                "xmax"
+              ],
+              "xmin": [
+                "bbox",
+                "xmin"
+              ],
+              "ymax": [
+                "bbox",
+                "ymax"
+              ],
+              "ymin": [
+                "bbox",
+                "ymin"
+              ]
+            }
+          },
+          "encoding": "WKB",
+          "geometry_types": [
+            "Point"
+          ]
+        }
+      },
+      "primary_column": "geometry",
+      "version": "1.1.0"
+    },
+    "hive_partition_columns": [
+      {
+        "name": "theme",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "type",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      }
+    ]
+  },
+  "source_url": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00000-417d568b-a25f-57b3-9e15-9876068be5d6-c000.zstd.parquet",
+  "stac": {
+    "columns": [
+      "id",
+      "geometry",
+      "confidence",
+      "websites",
+      "emails",
+      "socials",
+      "phones",
+      "brand",
+      "addresses",
+      "names",
+      "sources",
+      "operating_status",
+      "basic_category",
+      "taxonomy",
+      "version",
+      "bbox"
+    ],
+    "geoparquet_version": "1.1.0",
+    "primary_geometry": "geometry",
+    "row_count": 81455423
+  }
+}

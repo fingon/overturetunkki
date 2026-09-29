@@ -9,7 +9,7 @@ gate. Remaining items below are pending;
 - [x] Pin Go 1.27, ko, DuckDB Go/core, and H3 versions. Prototype a Linux native
   CGO build and ko image with required shared libraries and bundled extensions;
   verify non-root startup and no extension downloads at runtime.
-- [ ] Inspect the live STAC hierarchy and record fixtures for latest discovery,
+- [x] Inspect the live STAC hierarchy and record fixtures for latest discovery,
   places manifest resolution, conditional validators, asset identity, and schema.
   Confirm immutable release assumptions and canonical version hashing.
 - [ ] Prove the DuckDB H3 scalar UDF integration and performance. Implement and

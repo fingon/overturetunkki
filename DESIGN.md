@@ -59,6 +59,16 @@ mutable `latest` path inside SQL. The design assumes published release assets
 are immutable. Detecting silent in-place S3 mutation without upstream manifest
 changes would require object-level validation and is outside this contract.
 
+The live hierarchy is captured under `testdata/stac/`: the root `latest`
+pointer resolves to release `2026-09-23.1`, then to `places/place`, whose
+collection resolves sixteen AWS Parquet partition items. The current STAC
+items publish partition URLs, sizes, row counts, row-group counts, and spatial
+bounds but no object checksum field. HTTP ETags are retained as conditional
+validators, not treated as content checksums because the observed multipart
+ETags are not portable digest identities. The fixture's canonical input hashes
+the trusted URL manifest and the selected schema metadata, with the expected
+digest recorded in `testdata/stac/version.json`.
+
 Freshness is fail closed and checked on every tile request, including cache
 hits, negative hits, conditional requests, and range requests. Fetch the latest
 pointer with cache revalidation, using conditional HTTP requests when upstream

@@ -1,0 +1,89 @@
+{
+  "captured_on": "2026-09-29",
+  "responses": [
+    {
+      "name": "root",
+      "url": "https://stac.overturemaps.org/catalog.json",
+      "status": 200,
+      "content_type": "binary/octet-stream",
+      "content_length_bytes": 6529,
+      "etag": "\"eacdbd9bbb25624b63a6529d3f5653ec\"",
+      "last_modified": "Fri, 25 Sep 2026 16:21:04 GMT"
+    },
+    {
+      "name": "latest_release",
+      "url": "https://stac.overturemaps.org/2026-09-23.1/catalog.json",
+      "status": 200,
+      "content_type": "application/json",
+      "content_length_bytes": 1534,
+      "etag": "\"980b06095fd12064bea3c663a1b23e1e\"",
+      "last_modified": "Mon, 28 Sep 2026 21:03:14 GMT"
+    },
+    {
+      "name": "places_catalog",
+      "url": "https://stac.overturemaps.org/2026-09-23.1/places/catalog.json",
+      "status": 200,
+      "content_type": "application/json",
+      "content_length_bytes": 780,
+      "etag": "\"c29788f1ed11826a70601f72c8c80fe2\"",
+      "last_modified": "Mon, 28 Sep 2026 21:03:14 GMT"
+    },
+    {
+      "name": "places_collection",
+      "url": "https://stac.overturemaps.org/2026-09-23.1/places/place/collection.json",
+      "status": 200,
+      "content_type": "application/json",
+      "content_length_bytes": 4998,
+      "etag": "\"5539d5b7f1726589b90741eb06fe0170\"",
+      "last_modified": "Mon, 28 Sep 2026 21:03:14 GMT"
+    },
+    {
+      "name": "places_item_00000",
+      "url": "https://stac.overturemaps.org/2026-09-23.1/places/place/00000/00000.json",
+      "status": 200,
+      "content_type": "application/json",
+      "content_length_bytes": 2734,
+      "etag": "\"d117f6545a0f55c8ecf20d6090214c96\"",
+      "last_modified": "Mon, 28 Sep 2026 21:03:14 GMT"
+    },
+    {
+      "name": "places_item_00015",
+      "url": "https://stac.overturemaps.org/2026-09-23.1/places/place/00015/00015.json",
+      "status": 200,
+      "content_type": "application/json",
+      "content_length_bytes": 2737,
+      "etag": "\"f70043f4bd8a1129a91d0cd58bc2956c\"",
+      "last_modified": "Mon, 28 Sep 2026 21:03:14 GMT"
+    },
+    {
+      "name": "places_asset_00000",
+      "url": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00000-417d568b-a25f-57b3-9e15-9876068be5d6-c000.zstd.parquet",
+      "status": 200,
+      "content_type": "application/octet-stream",
+      "content_length_bytes": 680811676,
+      "etag": "\"259b020fe477b9093b0f71f07c83181b-11\"",
+      "last_modified": "Fri, 25 Sep 2026 16:05:23 GMT",
+      "accept_ranges": "bytes"
+    },
+    {
+      "name": "places_asset_00015",
+      "url": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00015-b21e3943-1706-5729-88ab-f4f5777eaae4-c000.zstd.parquet",
+      "status": 200,
+      "content_type": "application/octet-stream",
+      "content_length_bytes": 679288164,
+      "etag": "\"573adc5fdd73751129fc11f1b01cd16e-11\"",
+      "last_modified": "Fri, 25 Sep 2026 16:07:08 GMT",
+      "accept_ranges": "bytes"
+    }
+  ],
+  "conditional_request": {
+    "url": "https://stac.overturemaps.org/catalog.json",
+    "request_headers": {
+      "If-None-Match": "\"eacdbd9bbb25624b63a6529d3f5653ec\""
+    },
+    "status": 304,
+    "response_headers": {
+      "etag": "\"eacdbd9bbb25624b63a6529d3f5653ec\""
+    }
+  }
+}

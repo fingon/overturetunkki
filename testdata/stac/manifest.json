@@ -1,0 +1,344 @@
+{
+  "asset_selection": {
+    "provider": "aws",
+    "storage_region": "us-west-2",
+    "type": "application/vnd.apache.parquet"
+  },
+  "collection_id": "place",
+  "manifest": [
+    {
+      "bbox": [
+        -179.99806213378906,
+        -84.9901123046875,
+        -76.5058364868164,
+        28.64617919921875
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00000-417d568b-a25f-57b3-9e15-9876068be5d6-c000.zstd.parquet",
+      "partition_id": "00000",
+      "row_count": 5120674,
+      "row_group_count": 256,
+      "size_bytes": 680811676
+    },
+    {
+      "bbox": [
+        -120.50172424316406,
+        28.646177291870117,
+        -77.38333129882812,
+        34.509639739990234
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00001-947ef15d-91bf-56dd-a6a3-aad846cc7a28-c000.zstd.parquet",
+      "partition_id": "00001",
+      "row_count": 5065932,
+      "row_group_count": 512,
+      "size_bytes": 736561336
+    },
+    {
+      "bbox": [
+        -179.81707763671875,
+        34.509639739990234,
+        -88.6563949584961,
+        81.75200653076172
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00002-c0c1dd40-1cc6-5636-81da-0df43a88fa9d-c000.zstd.parquet",
+      "partition_id": "00002",
+      "row_count": 5110584,
+      "row_group_count": 512,
+      "size_bytes": 752486655
+    },
+    {
+      "bbox": [
+        -88.65640258789062,
+        34.509647369384766,
+        -76.50582885742188,
+        82.7169418334961
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00003-d872971a-e957-5cc9-a661-27396e8592fc-c000.zstd.parquet",
+      "partition_id": "00003",
+      "row_count": 5124095,
+      "row_group_count": 512,
+      "size_bytes": 758320439
+    },
+    {
+      "bbox": [
+        -75.56138610839844,
+        -84.92832946777344,
+        5.625,
+        -20.134138107299805
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00004-4792ea94-09f0-5546-beb1-f50d71febd84-c000.zstd.parquet",
+      "partition_id": "00004",
+      "row_count": 5135717,
+      "row_group_count": 256,
+      "size_bytes": 679312122
+    },
+    {
+      "bbox": [
+        -76.5058364868164,
+        -20.13412094116211,
+        6.285979747772217,
+        40.3844108581543
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00005-19ebf8b3-812f-5237-8867-7e5b47d1d6dd-c000.zstd.parquet",
+      "partition_id": "00005",
+      "row_count": 5087871,
+      "row_group_count": 256,
+      "size_bytes": 693781428
+    },
+    {
+      "bbox": [
+        -76.5058364868164,
+        40.38440704345703,
+        -1.5877792835235596,
+        83.57147979736328
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00006-4f05dab3-5982-5cee-9cd0-714856eac08e-c000.zstd.parquet",
+      "partition_id": "00006",
+      "row_count": 5137402,
+      "row_group_count": 256,
+      "size_bytes": 729007835
+    },
+    {
+      "bbox": [
+        -1.5877782106399536,
+        40.38440704345703,
+        6.285975933074951,
+        62.68696975708008
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00007-61ac23fc-0af6-5d61-8c46-5776ba7e6bf0-c000.zstd.parquet",
+      "partition_id": "00007",
+      "row_count": 5152063,
+      "row_group_count": 256,
+      "size_bytes": 728373349
+    },
+    {
+      "bbox": [
+        6.286300182342529,
+        -84.54301452636719,
+        42.14211654663086,
+        41.112125396728516
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00008-7a297224-4f30-5864-bfad-ebbcb6047b29-c000.zstd.parquet",
+      "partition_id": "00008",
+      "row_count": 5060836,
+      "row_group_count": 256,
+      "size_bytes": 662849078
+    },
+    {
+      "bbox": [
+        6.2860283851623535,
+        41.11212158203125,
+        42.14118957519531,
+        47.38207244873047
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00009-3f7e01dc-2fb9-50a7-8be5-65df80c1cdd4-c000.zstd.parquet",
+      "partition_id": "00009",
+      "row_count": 5018256,
+      "row_group_count": 256,
+      "size_bytes": 621355675
+    },
+    {
+      "bbox": [
+        6.285987854003906,
+        47.3820686340332,
+        42.14201736450195,
+        51.22665023803711
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00010-1c7c0e0e-408b-5c7c-8dc8-a1687f22ef6e-c000.zstd.parquet",
+      "partition_id": "00010",
+      "row_count": 5075322,
+      "row_group_count": 256,
+      "size_bytes": 632147404
+    },
+    {
+      "bbox": [
+        6.285979270935059,
+        51.226646423339844,
+        42.142005920410156,
+        80.50548553466797
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00011-9aa07e3a-309b-5031-8820-4ec743a80d43-c000.zstd.parquet",
+      "partition_id": "00011",
+      "row_count": 5088275,
+      "row_group_count": 256,
+      "size_bytes": 632751442
+    },
+    {
+      "bbox": [
+        42.14916229248047,
+        -84.9798812866211,
+        106.66258239746094,
+        18.11211395263672
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00012-5e6c496a-f443-52b4-bc5e-0b71af05ae54-c000.zstd.parquet",
+      "partition_id": "00012",
+      "row_count": 5078337,
+      "row_group_count": 256,
+      "size_bytes": 669380586
+    },
+    {
+      "bbox": [
+        106.6625747680664,
+        -84.7338638305664,
+        179.9976043701172,
+        18.11200714111328
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00013-87182afd-1282-5a98-b777-73886b671c42-c000.zstd.parquet",
+      "partition_id": "00013",
+      "row_count": 5047272,
+      "row_group_count": 256,
+      "size_bytes": 656760524
+    },
+    {
+      "bbox": [
+        42.14213562011719,
+        18.112117767333984,
+        105.80171203613281,
+        81.84305572509766
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00014-1d36203b-4312-5a97-b9e0-5c110ae7a274-c000.zstd.parquet",
+      "partition_id": "00014",
+      "row_count": 5058561,
+      "row_group_count": 256,
+      "size_bytes": 683038313
+    },
+    {
+      "bbox": [
+        105.80170440673828,
+        18.112319946289062,
+        179.59945678710938,
+        77.10000610351562
+      ],
+      "href": "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/release/2026-09-23.1/theme=places/type=place/part-00015-b21e3943-1706-5729-88ab-f4f5777eaae4-c000.zstd.parquet",
+      "partition_id": "00015",
+      "row_count": 5094226,
+      "row_group_count": 256,
+      "size_bytes": 679288164
+    }
+  ],
+  "release": "2026-09-23.1",
+  "schema": {
+    "columns": [
+      {
+        "name": "id",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "geometry",
+        "nullable": "YES",
+        "type": "GEOMETRY('OGC:CRS84')"
+      },
+      {
+        "name": "confidence",
+        "nullable": "YES",
+        "type": "DOUBLE"
+      },
+      {
+        "name": "websites",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "emails",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "socials",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "phones",
+        "nullable": "YES",
+        "type": "VARCHAR[]"
+      },
+      {
+        "name": "brand",
+        "nullable": "YES",
+        "type": "STRUCT(wikidata VARCHAR, \"names\" STRUCT(\"primary\" VARCHAR, common MAP(VARCHAR, VARCHAR), rules STRUCT(variant VARCHAR, \"language\" VARCHAR, perspectives STRUCT(\"mode\" VARCHAR, countries VARCHAR[]), \"value\" VARCHAR, \"between\" DOUBLE[], side VARCHAR)[]))"
+      },
+      {
+        "name": "addresses",
+        "nullable": "YES",
+        "type": "STRUCT(freeform VARCHAR, locality VARCHAR, postcode VARCHAR, region VARCHAR, country VARCHAR)[]"
+      },
+      {
+        "name": "names",
+        "nullable": "YES",
+        "type": "STRUCT(\"primary\" VARCHAR, common MAP(VARCHAR, VARCHAR), rules STRUCT(variant VARCHAR, \"language\" VARCHAR, perspectives STRUCT(\"mode\" VARCHAR, countries VARCHAR[]), \"value\" VARCHAR, \"between\" DOUBLE[], side VARCHAR)[])"
+      },
+      {
+        "name": "sources",
+        "nullable": "YES",
+        "type": "STRUCT(property VARCHAR, dataset VARCHAR, license VARCHAR, record_id VARCHAR, update_time VARCHAR, confidence DOUBLE, \"between\" DOUBLE[], provider VARCHAR, resource VARCHAR, \"version\" VARCHAR)[]"
+      },
+      {
+        "name": "operating_status",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "basic_category",
+        "nullable": "YES",
+        "type": "VARCHAR"
+      },
+      {
+        "name": "taxonomy",
+        "nullable": "YES",
+        "type": "STRUCT(\"primary\" VARCHAR, hierarchy VARCHAR[], alternates VARCHAR[])"
+      },
+      {
+        "name": "version",
+        "nullable": "YES",
+        "type": "INTEGER"
+      },
+      {
+        "name": "bbox",
+        "nullable": "YES",
+        "type": "STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE)"
+      }
+    ],
+    "geo_metadata": {
+      "columns": {
+        "geometry": {
+          "bbox": [
+            -179.99806213378906,
+            -84.9901123046875,
+            -76.5058364868164,
+            28.64617919921875
+          ],
+          "covering": {
+            "bbox": {
+              "xmax": [
+                "bbox",
+                "xmax"
+              ],
+              "xmin": [
+                "bbox",
+                "xmin"
+              ],
+              "ymax": [
+                "bbox",
+                "ymax"
+              ],
+              "ymin": [
+                "bbox",
+                "ymin"
+              ]
+            }
+          },
+          "encoding": "WKB",
+          "geometry_types": [
+            "Point"
+          ]
+        }
+      },
+      "primary_column": "geometry",
+      "version": "1.1.0"
+    },
+    "geoparquet_version": "1.1.0",
+    "primary_geometry": "geometry"
+  },
+  "source": "places/place"
+}
