@@ -72,11 +72,18 @@ type catalogResponse struct {
 }
 
 type errorResponse struct {
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	Retryable      bool   `json:"retryable"`
-	Release        string `json:"release,omitempty"`
-	CatalogVersion string `json:"catalog_version,omitempty"`
+	Code                string `json:"code"`
+	Message             string `json:"message"`
+	Retryable           bool   `json:"retryable"`
+	Release             string `json:"release,omitempty"`
+	CatalogVersion      string `json:"catalog_version,omitempty"`
+	Cell                string `json:"cell,omitempty"`
+	Resolution          *int   `json:"resolution,omitempty"`
+	MaxTileBytes        int64  `json:"max_tile_bytes,omitempty"`
+	FailedLimit         string `json:"failed_limit,omitempty"`
+	SuggestedResolution *int   `json:"suggested_resolution,omitempty"`
+	CanRefine           *bool  `json:"can_refine,omitempty"`
+	Guidance            string `json:"guidance,omitempty"`
 }
 
 func New(options Options) (*Server, error) {
@@ -172,7 +179,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	}
 	tile, err := server.provider.Get(request.Context(), snapshot, cell)
 	if err != nil {
-		status, response := classifyTileError(err)
+		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
 		writeError(responseWriter, status, response)
 		return
 	}
@@ -280,10 +287,12 @@ func requiredQueryValue(request *http.Request, name string) (string, error) {
 	return values[0], nil
 }
 
-func classifyTileError(err error) (int, errorResponse) {
+func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorResponse) {
 	switch {
 	case errors.Is(err, worker.ErrOutputTooLarge):
-		return http.StatusUnprocessableEntity, errorResponse{Code: "tile_too_large", Message: "tile exceeds configured size limits"}
+		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "compressed_bytes", "tile exceeds the compressed byte limit")
+	case errors.Is(err, worker.ErrTooManyRows):
+		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "rows", "tile exceeds the row limit")
 	case errors.Is(err, cache.ErrCapacityUnavailable):
 		return http.StatusServiceUnavailable, errorResponse{Code: "capacity_unavailable", Message: "tile capacity is unavailable", Retryable: true}
 	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, context.DeadlineExceeded):
@@ -293,6 +302,26 @@ func classifyTileError(err error) (int, errorResponse) {
 	default:
 		return http.StatusInternalServerError, errorResponse{Code: "internal_error", Message: "tile build failed"}
 	}
+}
+
+func sizeErrorResponse(cell h3.Cell, maxTileBytes int64, failedLimit, message string) errorResponse {
+	resolution := cell.Resolution()
+	canRefine := resolution < h3.MaxResolution
+	response := errorResponse{
+		Code:         "tile_too_large",
+		Message:      message,
+		Cell:         cell.String(),
+		Resolution:   &resolution,
+		MaxTileBytes: maxTileBytes,
+		FailedLimit:  failedLimit,
+		CanRefine:    &canRefine,
+		Guidance:     "cover the viewport or original cell with all intersecting finer cells and deduplicate POI ids",
+	}
+	if canRefine {
+		suggestedResolution := resolution + 1
+		response.SuggestedResolution = &suggestedResolution
+	}
+	return response
 }
 
 func etagMatches(header, etag string) bool {

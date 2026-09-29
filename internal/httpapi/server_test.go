@@ -170,6 +170,7 @@ func TestServerMapsTileFailuresAndCatalogReadiness(t *testing.T) {
 		code   string
 	}{
 		{name: "too large", err: worker.ErrOutputTooLarge, status: http.StatusUnprocessableEntity, code: "tile_too_large"},
+		{name: "too many rows", err: worker.ErrTooManyRows, status: http.StatusUnprocessableEntity, code: "tile_too_large"},
 		{name: "capacity", err: cache.ErrCapacityUnavailable, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
 		{name: "timeout", err: worker.ErrTileTimeout, status: http.StatusGatewayTimeout, code: "tile_timeout"},
 		{name: "upstream", err: worker.ErrUpstream, status: http.StatusServiceUnavailable, code: "upstream_unavailable"},
@@ -188,8 +189,31 @@ func TestServerMapsTileFailuresAndCatalogReadiness(t *testing.T) {
 			var response errorResponse
 			assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 			assert.Equal(t, response.Code, test.code)
+			if test.code == "tile_too_large" {
+				assert.Equal(t, response.Cell, cell.String())
+				assert.Assert(t, response.Resolution != nil)
+				assert.Assert(t, response.CanRefine != nil)
+			}
 		})
 	}
+
+	t.Run("resolution 15 is terminal", func(t *testing.T) {
+		observer := &testObserver{snapshot: testSnapshot()}
+		provider := &testProvider{err: worker.ErrOutputTooLarge}
+		server, err := New(testOptions(observer, provider))
+		assert.NilError(t, err)
+		cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), h3.MaxResolution)
+		assert.NilError(t, err)
+		request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+cell.String()+"?catalog_version="+url.QueryEscape(observer.snapshot.CatalogVersion), nil)
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		var response errorResponse
+		assert.Equal(t, recorder.Code, http.StatusUnprocessableEntity)
+		assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.Assert(t, response.CanRefine != nil)
+		assert.Assert(t, !*response.CanRefine)
+		assert.Assert(t, response.SuggestedResolution == nil)
+	})
 
 	observer := &testObserver{snapshot: testSnapshot(), readyErr: errors.New("not ready")}
 	server, err := New(testOptions(observer, &testProvider{}))

@@ -81,7 +81,7 @@ the tested HTTP endpoint contract. Remaining items below are pending;
 - [x] Implement catalog/tile/health/metrics endpoints and the documented JSON
   errors, version headers, ETags, freshness checks, and cache-control policy.
   Require catalog_version; ignore ranges initially; revalidate before 304.
-- [ ] Implement finer-resolution guidance and resolution-15 terminal errors.
+- [x] Implement finer-resolution guidance and resolution-15 terminal errors.
   Document viewport coverage rather than logical-child-only refinement, client
   deduplication, version replacement, and refresh after session resume.
 - [ ] Add request IDs, structured error logs, bounded-cardinality metrics,

@@ -175,7 +175,9 @@ A size error includes the cell, resolution, `max_tile_bytes`, the failed limit
 This is advice, not a guarantee the next resolution fits. At resolution 15,
 return `can_refine: false` with no suggested resolution; clients must omit the
 tile or use a deployment with different limits/fields. Never return truncated
-POI data as a successful tile.
+POI data as a successful tile. Guidance tells clients to cover their viewport
+or original cell with every intersecting finer cell and deduplicate POI IDs;
+logical children alone do not guarantee coverage of a footprint.
 
 ## Go CLI testing client
 
