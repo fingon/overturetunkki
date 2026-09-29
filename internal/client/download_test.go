@@ -178,6 +178,22 @@ func TestDownloadTileResponseParsesStructuredFailure(t *testing.T) {
 	}
 }
 
+func TestDownloadTileResponseBoundsErrorBody(t *testing.T) {
+	response := &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 Service Unavailable",
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", 32))),
+	}
+	options := testDownloadOptions(filepath.Join(t.TempDir(), "tile.parquet"))
+	options.ErrorBodyBytes = 8
+
+	_, err := DownloadTileResponse(context.Background(), response, options)
+	assert.ErrorContains(t, err, "exceeds 8 bytes")
+	var httpErr *HTTPError
+	assert.Assert(t, errors.As(err, &httpErr))
+}
+
 func testDownloadOptions(destination string) DownloadOptions {
 	return DownloadOptions{
 		Destination:            destination,

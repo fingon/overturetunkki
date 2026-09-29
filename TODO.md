@@ -104,7 +104,7 @@ items below are pending;
   checks, Content-Length and SHA-256 ETag validation, Parquet magic checks,
   temporary-file cleanup, atomic publication, and explicit overwrite control.
   Standardize the server's digest ETag format to match the client contract.
-- [ ] Provide stdout JSON results, stderr diagnostics, documented exit codes,
+- [x] Provide stdout JSON results, stderr diagnostics, documented exit codes,
   bounded error-body parsing, and actionable 409/422/503/504 messages, including
   resolution-15 and boundary-cell refinement guidance.
 - [ ] Add table-driven httptest coverage for discovery/download, explicit stale

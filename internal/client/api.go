@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/uber/h3-go/v4"
 )
@@ -70,6 +71,9 @@ func (err *HTTPError) Error() string {
 		return "HTTP request failed"
 	}
 	message := err.Meta.Status
+	if message == "" {
+		message = fmt.Sprintf("HTTP status %d", err.Meta.StatusCode)
+	}
 	if err.HasAPI && err.API.Code != "" {
 		message += ": " + err.API.Code
 		if err.API.Message != "" {
@@ -80,6 +84,53 @@ func (err *HTTPError) Error() string {
 		message += ": " + err.Cause.Error()
 	}
 	return message
+}
+
+func (err *HTTPError) Diagnostic() string {
+	if err == nil {
+		return "HTTP request failed"
+	}
+	details := make([]string, 0, 4)
+	switch err.Meta.StatusCode {
+	case http.StatusConflict:
+		if err.HasAPI && err.API.CatalogVersion != "" {
+			details = append(details, fmt.Sprintf("current catalog version is %q; rerun with --catalog-version=%q", err.API.CatalogVersion, err.API.CatalogVersion))
+		} else {
+			details = append(details, "refresh the catalog and retry with the current catalog version")
+		}
+	case http.StatusUnprocessableEntity:
+		if err.HasAPI && err.API.Resolution != nil {
+			details = append(details, fmt.Sprintf("cell %q is at resolution %d", err.API.Cell, *err.API.Resolution))
+		}
+		if err.HasAPI && err.API.CanRefine != nil {
+			if *err.API.CanRefine {
+				if err.API.SuggestedResolution != nil {
+					details = append(details, fmt.Sprintf("request a finer resolution such as %d", *err.API.SuggestedResolution))
+				} else {
+					details = append(details, "request a finer H3 resolution")
+				}
+			} else {
+				details = append(details, "resolution 15 is terminal; omit this tile or use a deployment with different limits")
+			}
+		}
+		if err.HasAPI && err.API.Guidance != "" {
+			details = append(details, "coverage guidance: "+err.API.Guidance)
+		}
+	case http.StatusServiceUnavailable:
+		details = append(details, "service is temporarily unavailable; retry later")
+	case http.StatusGatewayTimeout:
+		details = append(details, "tile build timed out; retry later; this does not prove the tile is oversized")
+	}
+	if err.RetryAfter != "" {
+		details = append(details, "retry after "+err.RetryAfter)
+	}
+	if err.RequestID != "" {
+		details = append(details, "request ID "+err.RequestID)
+	}
+	if len(details) == 0 {
+		return err.Error()
+	}
+	return err.Error() + "; " + strings.Join(details, "; ")
 }
 
 func (err *HTTPError) Unwrap() error {
@@ -95,8 +146,15 @@ func (client *Client) FetchCatalog(ctx context.Context) (CatalogResponse, Respon
 		return CatalogResponse{}, ResponseMeta{}, err
 	}
 	meta := responseMeta(response)
-	body, err := ReadBody(response, client.responseLimit())
+	maxBytes := client.responseLimit()
+	if response.StatusCode != http.StatusOK {
+		maxBytes = client.ErrorBodyLimit()
+	}
+	body, err := ReadBody(response, maxBytes)
 	if err != nil {
+		if meta.StatusCode != http.StatusOK {
+			return CatalogResponse{}, meta, newHTTPError(meta, nil, err)
+		}
 		return CatalogResponse{}, meta, fmt.Errorf("read catalog response: %w", err)
 	}
 	if meta.StatusCode != http.StatusOK {

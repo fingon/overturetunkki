@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,10 @@ func TestRunTileExplicitVersionDoesNotDiscover(t *testing.T) {
 			tileCalls++
 			assert.Equal(t, request.URL.Query().Get("catalog_version"), "explicit+sha256:test")
 			assert.Equal(t, request.Header.Get("If-None-Match"), `"sha256:old"`)
+			responseWriter.Header().Set(client.ReleaseHeader, "release")
+			responseWriter.Header().Set(client.CatalogVersionHeader, "explicit+sha256:test")
+			responseWriter.Header().Set(client.ProjectionHeader, "sha256:projection")
+			responseWriter.Header().Set("ETag", `"sha256:`+strings.Repeat("0", 64)+`"`)
 			responseWriter.WriteHeader(http.StatusNotModified)
 		default:
 			http.NotFound(responseWriter, request)
@@ -84,6 +89,7 @@ func TestRunTileExplicitVersionDoesNotDiscover(t *testing.T) {
 	assert.Equal(t, catalogCalls, 0)
 	assert.Equal(t, tileCalls, 1)
 	assert.Assert(t, bytes.Contains(output.body, []byte(`"status":304`)))
+	assert.Assert(t, bytes.Contains(output.body, []byte(`"projection_id":"sha256:projection"`)))
 }
 
 func writeTileResponse(t *testing.T, responseWriter http.ResponseWriter, body []byte, release, catalogVersion, projectionID, etag string) {
@@ -111,6 +117,28 @@ func TestRunValidatesClientConfiguration(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Assert(t, run(context.Background(), test.args) != nil)
+		})
+	}
+}
+
+func TestExitCodeMapsCLIAndHTTPFailures(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "success", want: exitSuccess},
+		{name: "invalid arguments", err: markArgumentError(fmt.Errorf("invalid")), want: exitInvalidArguments},
+		{name: "bad request", err: fmt.Errorf("request: %w", &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusBadRequest}}), want: exitInvalidArguments},
+		{name: "catalog changed", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusConflict}}, want: exitCatalogChanged},
+		{name: "tile too large", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusUnprocessableEntity}}, want: exitTileTooLarge},
+		{name: "service unavailable", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusServiceUnavailable}}, want: exitTemporaryFailure},
+		{name: "timeout", err: &client.HTTPError{Meta: client.ResponseMeta{StatusCode: http.StatusGatewayTimeout}}, want: exitTemporaryFailure},
+		{name: "unexpected", err: fmt.Errorf("unexpected"), want: exitFailure},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, exitCode(test.err), test.want)
 		})
 	}
 }

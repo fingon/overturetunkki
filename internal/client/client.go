@@ -102,6 +102,9 @@ func ReadBody(response *http.Response, maxBytes int64) ([]byte, error) {
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
 	closeErr := response.Body.Close()
 	if readErr != nil {
+		if closeErr != nil {
+			return nil, fmt.Errorf("read HTTP response body: %w; close HTTP response body: %v", readErr, closeErr)
+		}
 		return nil, fmt.Errorf("read HTTP response body: %w", readErr)
 	}
 	if closeErr != nil {
@@ -111,4 +114,11 @@ func ReadBody(response *http.Response, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP response body exceeds %d bytes", maxBytes)
 	}
 	return body, nil
+}
+
+func (client *Client) ErrorBodyLimit() int64 {
+	if client == nil || client.errorBodyBytes <= 0 {
+		return DefaultErrorBodyBytes
+	}
+	return client.errorBodyBytes
 }

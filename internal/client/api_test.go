@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,6 +129,94 @@ func TestHTTPErrorPreservesStructuredBody(t *testing.T) {
 	assert.Equal(t, httpError.RequestID, "request-42")
 	assert.Equal(t, httpError.RetryAfter, "1")
 	assert.Equal(t, httpError.API.Code, "catalog_changed")
+}
+
+func TestFetchCatalogBoundsErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusServiceUnavailable)
+		_, err := responseWriter.Write([]byte(strings.Repeat("x", 32)))
+		assert.NilError(t, err)
+	}))
+	defer server.Close()
+	httpClient, err := New(Options{ServerURL: server.URL, ErrorBodyBytes: 8})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	_, _, err = httpClient.FetchCatalog(context.Background())
+	assert.ErrorContains(t, err, "exceeds 8 bytes")
+	var httpErr *HTTPError
+	assert.Assert(t, errors.As(err, &httpErr))
+}
+
+func TestHTTPErrorDiagnosticProvidesRecoveryGuidance(t *testing.T) {
+	resolution := 9
+	suggestedResolution := 10
+	canRefine := true
+	terminalResolution := 15
+	cannotRefine := false
+	cases := []struct {
+		name  string
+		error *HTTPError
+		wants []string
+	}{
+		{
+			name: "catalog changed",
+			error: &HTTPError{
+				Meta:      ResponseMeta{StatusCode: http.StatusConflict, Status: "409 Conflict"},
+				HasAPI:    true,
+				API:       ErrorResponse{Code: "catalog_changed", Message: "catalog version is stale", CatalogVersion: "release+sha256:new"},
+				RequestID: "request-42",
+			},
+			wants: []string{"current catalog version", "--catalog-version", "request ID request-42"},
+		},
+		{
+			name: "refinement guidance",
+			error: &HTTPError{
+				Meta:   ResponseMeta{StatusCode: http.StatusUnprocessableEntity, Status: "422 Unprocessable Entity"},
+				HasAPI: true,
+				API: ErrorResponse{
+					Code:                "tile_too_large",
+					Message:             "tile exceeds the compressed byte limit",
+					Cell:                "8928308280fffff",
+					Resolution:          &resolution,
+					SuggestedResolution: &suggestedResolution,
+					CanRefine:           &canRefine,
+					Guidance:            "cover all intersecting finer cells",
+				},
+			},
+			wants: []string{"resolution 9", "finer resolution", "coverage guidance"},
+		},
+		{
+			name: "terminal refinement",
+			error: &HTTPError{
+				Meta:   ResponseMeta{StatusCode: http.StatusUnprocessableEntity, Status: "422 Unprocessable Entity"},
+				HasAPI: true,
+				API: ErrorResponse{
+					Code:       "tile_too_large",
+					Resolution: &terminalResolution,
+					CanRefine:  &cannotRefine,
+				},
+			},
+			wants: []string{"resolution 15 is terminal"},
+		},
+		{
+			name: "temporary failure",
+			error: &HTTPError{
+				Meta:       ResponseMeta{StatusCode: http.StatusGatewayTimeout, Status: "504 Gateway Timeout"},
+				RetryAfter: "1",
+			},
+			wants: []string{"retry later", "does not prove the tile is oversized", "retry after 1"},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			diagnostic := test.error.Diagnostic()
+			for _, want := range test.wants {
+				assert.Assert(t, strings.Contains(diagnostic, want), diagnostic)
+			}
+		})
+	}
 }
 
 func testCellString(t *testing.T) string {

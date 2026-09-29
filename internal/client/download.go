@@ -25,6 +25,7 @@ const (
 type DownloadOptions struct {
 	Destination            string
 	Force                  bool
+	ErrorBodyBytes         int64
 	MaxDownloadBytes       int64
 	ExpectedCatalogVersion string
 	ExpectedProjectionID   string
@@ -54,10 +55,18 @@ func DownloadTileResponse(ctx context.Context, response *http.Response, options 
 			return DownloadResult{}, fmt.Errorf("download tile: close 304 response: %w", closeErr)
 		}
 		result.NotModified = true
+		result.Release = response.Header.Get(ReleaseHeader)
+		result.CatalogVersion = response.Header.Get(CatalogVersionHeader)
+		result.ProjectionID = response.Header.Get(ProjectionHeader)
+		result.ETag = response.Header.Get("ETag")
 		return result, nil
 	}
 	if response.StatusCode != http.StatusOK {
-		return DownloadResult{}, ParseHTTPError(response, DefaultErrorBodyBytes)
+		maxErrorBytes := options.ErrorBodyBytes
+		if maxErrorBytes <= 0 {
+			maxErrorBytes = DefaultErrorBodyBytes
+		}
+		return DownloadResult{}, ParseHTTPError(response, maxErrorBytes)
 	}
 	if err := validateDownloadOptions(options); err != nil {
 		if closeErr := response.Body.Close(); closeErr != nil {

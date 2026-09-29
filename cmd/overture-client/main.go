@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -36,12 +38,34 @@ type tileCommand struct {
 	MaxDownloadBytes int64  `name:"max-download-bytes" env:"OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES" default:"67108864" help:"Maximum downloaded response bytes."`
 }
 
+const (
+	exitSuccess          = 0
+	exitFailure          = 1
+	exitInvalidArguments = 2
+	exitCatalogChanged   = 3
+	exitTileTooLarge     = 4
+	exitTemporaryFailure = 5
+)
+
+type argumentError struct {
+	cause error
+}
+
+func (err *argumentError) Error() string {
+	return err.cause.Error()
+}
+
+func (err *argumentError) Unwrap() error {
+	return err.cause
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("overture client failed", "error", err)
-		os.Exit(1)
+		code := exitCode(err)
+		slog.Error("overture client failed", "error", diagnostic(err), "exit_code", code)
+		os.Exit(code)
 	}
 }
 
@@ -60,11 +84,11 @@ func run(ctx context.Context, args []string) error {
 	}
 	parsed, err := parser.Parse(args)
 	if err != nil {
-		return fmt.Errorf("parse client command: %w", err)
+		return markArgumentError(fmt.Errorf("parse client command: %w", err))
 	}
 	clientConfig := client.Config{ServerURL: config.ServerURL, Timeout: config.Timeout, Verbose: config.Verbose}
 	if err := clientConfig.Validate(); err != nil {
-		return fmt.Errorf("validate client configuration: %w", err)
+		return markArgumentError(fmt.Errorf("validate client configuration: %w", err))
 	}
 	logging.Configure(config.Verbose)
 	commandContext, cancel := context.WithTimeout(ctx, config.Timeout)
@@ -74,7 +98,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	serverURL, err := clientConfig.NormalizedServerURL()
 	if err != nil {
-		return fmt.Errorf("normalize client configuration: %w", err)
+		return markArgumentError(fmt.Errorf("normalize client configuration: %w", err))
 	}
 	httpClient, err := client.New(client.Options{ServerURL: serverURL})
 	if err != nil {
@@ -82,7 +106,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	commandName := strings.Fields(parsed.Command())
 	if len(commandName) == 0 {
-		return fmt.Errorf("client command is required")
+		return markArgumentError(fmt.Errorf("client command is required"))
 	}
 	switch commandName[0] {
 	case "catalog":
@@ -90,7 +114,7 @@ func run(ctx context.Context, args []string) error {
 	case "tile":
 		return runTile(commandContext, httpClient, config.Tile)
 	default:
-		return fmt.Errorf("client command %q is not supported", parsed.Command())
+		return markArgumentError(fmt.Errorf("client command %q is not supported", parsed.Command()))
 	}
 }
 
@@ -109,6 +133,7 @@ func runCatalog(ctx context.Context, httpClient *client.Client) error {
 }
 
 func runTile(ctx context.Context, httpClient *client.Client, command tileCommand) error {
+	started := time.Now()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("tile command canceled: %w", err)
 	}
@@ -117,13 +142,13 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 	}
 	cell, err := client.ParseCell(command.Cell)
 	if err != nil {
-		return err
+		return markArgumentError(err)
 	}
 	if command.Output == "" {
-		return fmt.Errorf("tile command output is required")
+		return markArgumentError(fmt.Errorf("tile command output is required"))
 	}
 	if command.MaxDownloadBytes <= 0 {
-		return fmt.Errorf("tile command max download bytes must be positive")
+		return markArgumentError(fmt.Errorf("tile command max download bytes must be positive"))
 	}
 	catalogVersion := command.CatalogVersion
 	expectedProjectionID := ""
@@ -146,6 +171,7 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 	downloadResult, err := client.DownloadTileResponse(ctx, response, client.DownloadOptions{
 		Destination:            command.Output,
 		Force:                  command.Force,
+		ErrorBodyBytes:         httpClient.ErrorBodyLimit(),
 		MaxDownloadBytes:       maxDownloadBytes,
 		ExpectedCatalogVersion: catalogVersion,
 		ExpectedProjectionID:   expectedProjectionID,
@@ -163,6 +189,7 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 		DownloadedBytes int64  `json:"downloaded_bytes,omitempty"`
 		PublishedPath   string `json:"published_path,omitempty"`
 		NotModified     bool   `json:"not_modified,omitempty"`
+		ElapsedMS       int64  `json:"elapsed_ms"`
 	}{
 		Cell:            cell.String(),
 		Release:         downloadResult.Release,
@@ -173,9 +200,49 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 		DownloadedBytes: downloadResult.DownloadedBytes,
 		PublishedPath:   downloadResult.PublishedPath,
 		NotModified:     downloadResult.NotModified,
+		ElapsedMS:       time.Since(started).Milliseconds(),
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		return fmt.Errorf("write tile result: %w", err)
 	}
 	return nil
+}
+
+func markArgumentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &argumentError{cause: err}
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return exitSuccess
+	}
+	var argumentErr *argumentError
+	if errors.As(err, &argumentErr) {
+		return exitInvalidArguments
+	}
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		switch httpErr.Meta.StatusCode {
+		case http.StatusBadRequest:
+			return exitInvalidArguments
+		case http.StatusConflict:
+			return exitCatalogChanged
+		case http.StatusUnprocessableEntity:
+			return exitTileTooLarge
+		case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return exitTemporaryFailure
+		}
+	}
+	return exitFailure
+}
+
+func diagnostic(err error) string {
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Diagnostic()
+	}
+	return err.Error()
 }
