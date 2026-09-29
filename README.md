@@ -15,5 +15,10 @@ The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses
 architecture-specific checksums and disables runtime extension downloads.
 
+Use `make lint`, `make test`, and `make build` for local checks. `make image`
+and `make smoke` build and run the native probe image; `make build-linux` uses a
+Linux CGO builder. The CI workflow gates amd64 image smoke and verifies arm64
+with the same bundled-extension check.
+
 See [DESIGN.md](DESIGN.md) for the architecture and API, and [TODO.md](TODO.md)
 for the implementation backlog.

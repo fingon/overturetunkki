@@ -419,11 +419,12 @@ changes/check failures, cache hits/misses, negative hits, eviction,
 bytes/reservations, workers/queue, latency, cancellation, and size rejection.
 Avoid H3 cells or release IDs as unbounded metric labels.
 
-The `Makefile` exposes `lint`, `test`, `build`, `image`, `smoke`, and `hooks`
-targets. `lint` runs `prek run --all-files`, including the pinned standard
-hooks, `gofmt`, and `go vet`; tests remain a separate target. The current image
-and smoke targets exercise the bundled native dependency probe. The pre-commit
-hook is installed with `make hooks`.
+The `Makefile` exposes `lint`, `test`, `build`, `build-linux`, `image`, `smoke`,
+and `hooks` targets. `lint` runs `prek run --all-files`, including the pinned
+standard hooks, `gofmt`, and `go vet`; tests remain a separate target.
+`build-linux` uses the pinned Go container toolchain for Linux CGO artifacts. The
+current image and smoke targets exercise the bundled native dependency probe.
+The pre-commit hook is installed with `make hooks`.
 
 Pin Go 1.27, ko, the DuckDB Go driver/core, H3, extensions, and runtime image.
 The [DuckDB Go client](https://duckdb.org/docs/current/clients/go/overview) uses

@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Read pinned tool versions
+        id: versions
+        shell: bash
+        run: |
+          source build/versions.env
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "prek=$PREK_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.versions.outputs.go }}
+          cache: true
+      - name: Install pinned prek
+        run: |
+          python3 -m venv "$RUNNER_TEMP/prek-venv"
+          "$RUNNER_TEMP/prek-venv/bin/pip" install "prek==${{ steps.versions.outputs.prek }}"
+          echo "$RUNNER_TEMP/prek-venv/bin" >> "$GITHUB_PATH"
+      - name: Run lint
+        run: make lint
+      - name: Run tests
+        run: make test
+      - name: Build host binaries
+        run: make build
+      - name: Set up Linux builder
+        uses: docker/setup-buildx-action@v3
+      - name: Build Linux artifacts
+        run: make build-linux TARGET_ARCH=amd64
+
+  native-image-amd64:
+    name: Native image smoke (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Read pinned tool versions
+        id: versions
+        shell: bash
+        run: |
+          source build/versions.env
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "ko=$KO_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.versions.outputs.go }}
+          cache: true
+      - name: Install pinned ko
+        run: |
+          go install "github.com/google/ko@${{ steps.versions.outputs.ko }}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build and smoke-test the amd64 image
+        run: make smoke TARGET_ARCH=amd64 IMAGE_TAG=ci-${GITHUB_SHA}
+
+  native-image-arm64:
+    name: Native image smoke (arm64)
+    needs: native-image-amd64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Read pinned tool versions
+        id: versions
+        shell: bash
+        run: |
+          source build/versions.env
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "ko=$KO_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.versions.outputs.go }}
+          cache: true
+      - name: Install pinned ko
+        run: |
+          go install "github.com/google/ko@${{ steps.versions.outputs.ko }}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build and smoke-test the arm64 image
+        run: make smoke TARGET_ARCH=arm64 IMAGE_TAG=ci-${GITHUB_SHA}

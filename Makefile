@@ -13,7 +13,7 @@ IMAGE_REPO ?= overturetunkki/native-probe
 IMAGE_TAG ?= dev
 IMAGE_REF := $(IMAGE_REPO):$(IMAGE_TAG)
 
-.PHONY: all lint test build fetch-extensions image smoke hooks clean
+.PHONY: all lint test build build-linux fetch-extensions image smoke hooks clean
 
 all: test
 
@@ -27,6 +27,13 @@ build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(SERVICE_BIN) ./cmd/overturetunkki
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(NATIVE_PROBE_BIN) ./cmd/native-probe
+
+build-linux:
+	mkdir -p $(BIN_DIR)/linux-$(TARGET_ARCH)
+	$(DOCKER) buildx build --platform linux/$(TARGET_ARCH) \
+		--build-arg GO_VERSION=$$(awk -F= '$$1 == "GO_VERSION" { print $$2 }' build/versions.env) \
+		--output type=local,dest=$(BIN_DIR)/linux-$(TARGET_ARCH) \
+		-f build/native-linux.Dockerfile .
 
 fetch-extensions:
 	./scripts/fetch-duckdb-extensions $(TARGET_ARCH)

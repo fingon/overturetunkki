@@ -1,8 +1,8 @@
 # Implementation backlog
 
 The repository contains the design and the completed native dependency build,
-H3 filtering, worker output-limit, GeoParquet writer compatibility, and typed
-command configuration gates. Remaining items below are pending;
+H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
+command configuration, and CI build gates. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -29,9 +29,9 @@ command configuration gates. Remaining items below are pending;
 
 - [x] Add the Go module, supervisor/worker command modes, typed kong config with
   documented defaults and environment overrides, validation, and slog `-v`.
-- [ ] Add Makefile lint/test/build/image/smoke targets and a pinned prek
+- [x] Add Makefile lint/test/build/image/smoke targets and a pinned prek
   configuration; enable hooks. Use gotest.tools/v3 and table-driven tests.
-- [ ] Add ko configuration, native Linux build tooling, digest-pinned runtime,
+- [x] Add ko configuration, native Linux build tooling, digest-pinned runtime,
   packaged extensions, and CI. Gate linux/amd64 on image smoke tests; add native
   arm64 only when its linkage and extension artifacts are verified.
 
