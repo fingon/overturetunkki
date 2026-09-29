@@ -40,6 +40,9 @@ func SetFileSizeLimit(maxBytes int64) error {
 }
 
 func DisableCopySpill(ctx context.Context, conn *sql.Conn) error {
+	if ctx == nil {
+		return fmt.Errorf("disable COPY spill: context is nil")
+	}
 	if conn == nil {
 		return fmt.Errorf("disable COPY spill: nil DuckDB connection")
 	}
@@ -56,6 +59,9 @@ func DisableCopySpill(ctx context.Context, conn *sql.Conn) error {
 }
 
 func CopyWithOutputLimit(ctx context.Context, conn *sql.Conn, query, outputPath string, maxBytes int64) (CopyResult, error) {
+	if ctx == nil {
+		return CopyResult{}, fmt.Errorf("COPY output guard: context is nil")
+	}
 	if conn == nil {
 		return CopyResult{}, fmt.Errorf("COPY output guard: nil DuckDB connection")
 	}
@@ -70,10 +76,10 @@ func CopyWithOutputLimit(ctx context.Context, conn *sql.Conn, query, outputPath 
 	}
 
 	if err := DisableCopySpill(ctx, conn); err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, err)
+		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(err))
 	}
 	if err := SetFileSizeLimit(maxBytes); err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, err)
+		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(err))
 	}
 
 	if _, err := conn.ExecContext(ctx, query); err != nil {
@@ -81,7 +87,7 @@ func CopyWithOutputLimit(ctx context.Context, conn *sql.Conn, query, outputPath 
 	}
 	fileInfo, err := os.Stat(outputPath)
 	if err != nil {
-		return CopyResult{}, cleanupAfterFailure(outputPath, fmt.Errorf("stat COPY output %q: %w", outputPath, err))
+		return CopyResult{}, cleanupAfterFailure(outputPath, classifyWorkerError(fmt.Errorf("stat COPY output %q: %w", outputPath, err)))
 	}
 	if fileInfo.Size() > maxBytes {
 		return CopyResult{}, cleanupAfterFailure(outputPath, &OutputTooLargeError{
@@ -126,5 +132,5 @@ func classifyCopyError(err error, maxBytes int64) error {
 		strings.Contains(lowerMessage, "file too large") {
 		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %v", ErrOutputTooLarge, maxBytes, err)
 	}
-	return fmt.Errorf("DuckDB COPY failed: %w", err)
+	return classifyWorkerError(fmt.Errorf("DuckDB COPY failed: %w", err))
 }

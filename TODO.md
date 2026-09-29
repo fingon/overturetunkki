@@ -1,9 +1,9 @@
 # Implementation backlog
 
 The repository contains the design and the completed native dependency build,
-H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
-command configuration, CI build gates, catalog validation, and catalog
-observation. Remaining items below are pending;
+H3 filtering, bounded worker query/output validation, GeoParquet writer
+compatibility, typed command configuration, CI build gates, catalog validation,
+and catalog observation. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -54,7 +54,7 @@ observation. Remaining items below are pending;
 - [x] Query pinned S3 assets using bbox/projection pushdown and exact H3
   membership. Fail visibly on invalid geometry. Materialize only the configured
   row allowance plus one, then reject or COPY a complete zstd GeoParquet file.
-- [ ] Apply worker memory/thread/deadline settings, scratch allocations, and
+- [x] Apply worker memory/thread/deadline settings, scratch allocations, and
   output limits. Distinguish size errors, disk failures, OOM, timeout, and S3
   errors. Validate final footer/schema/size and calculate content digest.
 - [ ] Test empty cells, field typing/nulls, nested columns, H3 refinement edge

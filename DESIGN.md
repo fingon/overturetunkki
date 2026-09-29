@@ -4,8 +4,8 @@
 
 This document specifies the implementation. The native dependency, image build,
 H3 filtering, worker cell/projection validation and bounded candidate query,
-worker output-limit, GeoParquet writer compatibility, typed command
-configuration, catalog validation, and catalog observation gates are
+worker runtime/output validation, GeoParquet writer compatibility, typed
+command configuration, catalog validation, and catalog observation gates are
 implemented; the HTTP service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
@@ -340,8 +340,11 @@ cleans the staging path. The same package verifies that candidate materializing
 queries use `LIMIT max_tile_rows + 1`, including zero and overflow limits.
 
 After COPY, validate the footer, GeoParquet metadata, actual file size, and
-expected schema before publication. Include footer bytes in the limit and allow
-exact equality. No tile bytes are sent to HTTP clients until validation succeeds.
+expected schema before publication. `RuntimeSettings` applies DuckDB memory,
+thread, scratch, and tile-deadline settings; `BuildTileWithSettings` validates
+the independent footer/schema reader, size, and SHA-256 digest before returning
+a result. Include footer bytes in the limit and allow exact equality. No tile
+bytes are sent to HTTP clients until validation succeeds.
 DuckDB's [COPY options](https://duckdb.org/docs/lts/sql/statements/copy) support
 zstd, but `FILE_SIZE_BYTES` is a file-splitting target, not a hard single-file
 size guard. Do not use it for this contract.
