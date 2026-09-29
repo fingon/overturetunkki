@@ -12,7 +12,7 @@ pruning, validated worker projections and bounded candidate queries, worker
 runtime/output validation, GeoParquet 1.1 writer compatibility, typed
 supervisor/worker configuration, deadline-bound STAC catalog validation and
 observation with rollover/fail-closed coverage, cache ownership/admission/
-persistence and bounded scratch/
+persistence with quota/restart coverage, and bounded scratch/
 negative-cache primitives, and the tested HTTP endpoint contract are
 implemented; HTTP request IDs, bounded metrics, backpressure, write deadlines,
 and graceful shutdown are also covered. Service wiring and client implementation

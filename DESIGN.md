@@ -438,6 +438,11 @@ job deadline. Cancel SQL then terminate an unresponsive isolated worker. Release
 reservations only after cleanup. Bound slow-client write time so pinned files
 cannot consume capacity indefinitely.
 
+Deterministic cache tests cover exact byte/entry quota boundaries, pinned
+capacity failures, parallel distinct-key admissions, last-waiter cancellation,
+generation-key fencing, publication/storage failures, interrupted sidecar
+publication, orphan cleanup, corruption, and restart accounting.
+
 Cache `tile_too_large` decisions in a separate bounded in-memory LRU with a short
 TTL, keyed identically. Do not cache transient upstream/storage failures as size
 errors. Catalog freshness checks still precede negative hits.

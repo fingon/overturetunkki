@@ -73,7 +73,7 @@ items below are pending;
   reconciliation. Keep deleted/open files and failed cleanup accounted.
 - [x] Implement bounded scratch with deployment quotas and separate bounded
   TTL negative-cache entries for proven size rejections only.
-- [ ] Test quota boundaries, all-pinned capacity failures, parallel admissions,
+- [x] Test quota boundaries, all-pinned capacity failures, parallel admissions,
   cancellation of the last waiter, generation changes, disk-full errors,
   interrupted publication, orphan cleanup, corruption, and restart accounting.
 

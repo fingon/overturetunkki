@@ -238,6 +238,107 @@ func TestCacheReopenDoesNotServeOldGenerationForNewKey(t *testing.T) {
 	assert.NilError(t, reopened.Close())
 }
 
+func TestCacheRemovesOrphanFilesAtStartup(t *testing.T) {
+	root := t.TempDir()
+	cache, err := New(Options{Root: root, MaxBytes: 20, MaxEntries: 4})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	tilePath, err := cache.Path(testKey())
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, cache.Close())
+		return
+	}
+	sidecarKey := testKey()
+	sidecarKey.Cell = "8928308280ffffe"
+	sidecarPath, err := cache.Path(sidecarKey)
+	assert.NilError(t, err)
+	assert.NilError(t, cache.Close())
+	assert.NilError(t, os.MkdirAll(filepath.Dir(tilePath), 0o750))
+	assert.NilError(t, os.MkdirAll(filepath.Dir(sidecarPath), 0o750))
+	assert.NilError(t, os.WriteFile(tilePath, []byte("orphan tile"), 0o600))
+	assert.NilError(t, os.WriteFile(strings.TrimSuffix(sidecarPath, fileSuffix)+sidecarSuffix, []byte("{}"), 0o600))
+
+	reopened, err := New(Options{Root: root, MaxBytes: 20, MaxEntries: 4})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	assert.Assert(t, !fileExists(tilePath))
+	assert.Assert(t, !fileExists(strings.TrimSuffix(sidecarPath, fileSuffix)+sidecarSuffix))
+	assert.DeepEqual(t, reopened.Stats(), Stats{})
+	assert.NilError(t, reopened.Close())
+}
+
+func TestCacheRemovesPublishedTileWhenSidecarPublicationIsInterrupted(t *testing.T) {
+	root := t.TempDir()
+	cache, err := New(Options{Root: root, MaxBytes: 100, MaxEntries: 2})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	reservation, err := cache.Reserve(context.Background(), 30)
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, cache.Close())
+		return
+	}
+	key := testKey()
+	staging, err := cache.CreateStaging(key)
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, cache.Close())
+		return
+	}
+	stagingPath := staging.Name()
+	_, err = staging.Write([]byte("interrupted publication"))
+	assert.NilError(t, err)
+	assert.NilError(t, staging.Sync())
+	assert.NilError(t, staging.Close())
+	finalPath, err := cache.Path(key)
+	assert.NilError(t, err)
+	sidecarPath := strings.TrimSuffix(finalPath, fileSuffix) + sidecarSuffix
+	assert.NilError(t, os.MkdirAll(filepath.Dir(sidecarPath), 0o750))
+	assert.NilError(t, os.Mkdir(sidecarPath, 0o750))
+	_, err = reservation.Publish(key, stagingPath, key.CatalogVersion)
+	assert.ErrorContains(t, err, "publish sidecar")
+	assert.Assert(t, !fileExists(finalPath))
+	assert.Assert(t, !fileExists(stagingPath))
+	assert.NilError(t, reservation.Release())
+	assert.DeepEqual(t, cache.Stats(), Stats{})
+	assert.NilError(t, cache.Close())
+}
+
+func TestCacheReportsPublishStorageFailure(t *testing.T) {
+	root := t.TempDir()
+	cache, err := New(Options{Root: root, MaxBytes: 20, MaxEntries: 2})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	key := testKey()
+	staging, err := cache.CreateStaging(key)
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, cache.Close())
+		return
+	}
+	stagingPath := staging.Name()
+	_, err = staging.Write([]byte("storage failure"))
+	assert.NilError(t, err)
+	assert.NilError(t, staging.Sync())
+	assert.NilError(t, staging.Close())
+	finalPath, err := cache.Path(key)
+	assert.NilError(t, err)
+	assert.NilError(t, os.WriteFile(filepath.Dir(finalPath), []byte("not a directory"), 0o600))
+	_, err = cache.Publish(key, stagingPath, key.CatalogVersion)
+	assert.ErrorContains(t, err, "create cache entry directory")
+	assert.NilError(t, cache.RemoveStaging(stagingPath))
+	assert.NilError(t, cache.Close())
+}
+
 func TestCachePinnedCapacityAndCorruptStartupCleanup(t *testing.T) {
 	root := t.TempDir()
 	cache, err := New(Options{Root: root, MaxBytes: 8, MaxEntries: 1})
@@ -349,6 +450,52 @@ func TestSchedulerCoalescesSameKeyAndCleansReservation(t *testing.T) {
 	assert.DeepEqual(t, cache.Stats(), Stats{})
 }
 
+func TestSchedulerRunsDifferentKeysInParallel(t *testing.T) {
+	cache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	scheduler, err := NewScheduler(cache, SchedulerOptions{Workers: 2, QueueCapacity: 2})
+	assert.NilError(t, err)
+	if err != nil {
+		assert.NilError(t, cache.Close())
+		return
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	build := func(cell string) JobFunc {
+		return func(ctx context.Context, _ *Reservation) error {
+			started <- cell
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	firstKey := testKey()
+	secondKey := firstKey
+	secondKey.Cell = "8928308280ffffe"
+	results := make(chan error, 2)
+	go func() { results <- scheduler.Do(context.Background(), firstKey, 10, build(firstKey.Cell)) }()
+	go func() { results <- scheduler.Do(context.Background(), secondKey, 10, build(secondKey.Cell)) }()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("scheduler did not start both jobs")
+		}
+	}
+	close(release)
+	assert.NilError(t, <-results)
+	assert.NilError(t, <-results)
+	assert.DeepEqual(t, cache.Stats(), Stats{})
+	assert.NilError(t, scheduler.Close())
+	assert.NilError(t, cache.Close())
+}
+
 func TestSchedulerCallerDetachmentCancelsUnobservedBuild(t *testing.T) {
 	cache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
 	assert.NilError(t, err)
@@ -381,7 +528,7 @@ func TestSchedulerCallerDetachmentCancelsUnobservedBuild(t *testing.T) {
 	cancel()
 	assert.Assert(t, errors.Is(<-done, context.Canceled))
 	<-canceled
-	assert.DeepEqual(t, cache.Stats(), Stats{})
+	waitForCacheStats(t, cache, Stats{})
 }
 
 func TestSchedulerRejectsFullQueueAndClosedState(t *testing.T) {
@@ -434,4 +581,16 @@ func testKey() Key {
 		Cell:           "8928308280fffff",
 		SizePolicyID:   "sha256:size-policy",
 	}
+}
+
+func waitForCacheStats(t *testing.T, cache *Cache, expected Stats) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if cache.Stats() == expected {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	assert.DeepEqual(t, cache.Stats(), expected)
 }
