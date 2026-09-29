@@ -35,13 +35,16 @@ import (
 )
 
 const (
-	fixtureRelease      = "2026-09-23.1"
-	rolloverRelease     = "2026-09-24.0"
-	containerImageEnv   = "OVERTURE_SERVICE_IMAGE"
-	containerTestEnv    = "OVERTURE_CONTAINER_TEST"
-	clientBinaryEnv     = "OVERTURE_CLIENT_BIN"
-	containerName       = "overturetunkki-container-test"
-	containerListenPort = 8080
+	containerCommand     = "podman"
+	containerWorkerCount = 2
+	fixtureHostname      = "host.containers.internal"
+	fixtureRelease       = "2026-09-23.1"
+	rolloverRelease      = "2026-09-24.0"
+	containerImageEnv    = "OVERTURE_SERVICE_IMAGE"
+	containerTestEnv     = "OVERTURE_CONTAINER_TEST"
+	clientBinaryEnv      = "OVERTURE_CLIENT_BIN"
+	containerName        = "overturetunkki-container-test"
+	containerListenPort  = 8080
 )
 
 type fixtureMode string
@@ -68,16 +71,16 @@ type fixtureServer struct {
 
 func TestContainerLifecycle(t *testing.T) {
 	if os.Getenv(containerTestEnv) != "1" {
-		t.Skip("set OVERTURE_CONTAINER_TEST=1 to run the Docker integration test")
+		t.Skip("set OVERTURE_CONTAINER_TEST=1 to run the Podman integration test")
 	}
 	image := os.Getenv(containerImageEnv)
 	if image == "" {
 		image = "overturetunkki/service:dev"
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Fatalf("Docker is required for the opt-in container test: %v", err)
+	if _, err := exec.LookPath(containerCommand); err != nil {
+		t.Fatalf("Podman is required for the opt-in container test: %v", err)
 	}
-	if err := runCommand("docker", "image", "inspect", image); err != nil {
+	if err := runCommand(containerCommand, "image", "inspect", image); err != nil {
 		t.Fatalf("inspect service image %q: %v", image, err)
 	}
 	clientBinary := os.Getenv(clientBinaryEnv)
@@ -94,8 +97,8 @@ func TestContainerLifecycle(t *testing.T) {
 		t.Fatalf("make cache directory writable: %v", err)
 	}
 	container := newServiceContainer(t, image, fixture, cacheDirectory)
+	t.Cleanup(container.remove)
 	container.start()
-	defer container.remove()
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	waitForReady(t, client, container.url("/readyz"))
@@ -134,7 +137,7 @@ func TestContainerLifecycle(t *testing.T) {
 	})
 
 	t.Run("concurrent clients", func(t *testing.T) {
-		const clientCount = 8
+		const clientCount = containerWorkerCount
 		errors := make(chan error, clientCount)
 		var waitGroup sync.WaitGroup
 		for range clientCount {
@@ -147,7 +150,7 @@ func TestContainerLifecycle(t *testing.T) {
 					return
 				}
 				if response.StatusCode != http.StatusOK {
-					errors <- fmt.Errorf("concurrent tile returned %s", response.Status)
+					errors <- fmt.Errorf("concurrent tile returned %s; logs:\n%s", response.Status, podmanLogs(t, container.name))
 					return
 				}
 				if _, err := io.Copy(io.Discard, response.Body); err != nil {
@@ -256,13 +259,13 @@ func TestContainerLifecycle(t *testing.T) {
 			validateTile(t, body)
 		})
 	} else {
-		t.Log("worker PID replacement is only exercised on Linux Docker hosts")
+		t.Log("worker PID replacement is only exercised on Linux Podman hosts")
 	}
 
 	container.remove()
 	container = newServiceContainer(t, image, fixture, cacheDirectory)
+	t.Cleanup(container.remove)
 	container.start()
-	defer container.remove()
 	waitForReady(t, client, container.url("/readyz"))
 	restartedBody, _ := fetchTile(t, client, container, newCatalog.CatalogVersion, cell, http.StatusOK)
 	validateTile(t, restartedBody)
@@ -293,7 +296,6 @@ func newServiceContainer(t *testing.T, image string, fixture *fixtureServer, cac
 		cacheDirectory: cacheDirectory,
 		certPath:       fixture.certPath,
 		name:           containerName,
-		hostPort:       reservePort(t),
 	}
 }
 
@@ -305,13 +307,11 @@ func (container *serviceContainer) start() {
 		"--user", "65532:65532",
 		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
-		"--add-host", "host.docker.internal:host-gateway",
-		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", container.hostPort, containerListenPort),
+		"--userns", "keep-id:uid=65532,gid=65532",
+		"--publish", fmt.Sprintf("127.0.0.1::%d", containerListenPort),
 		"--mount", "type=bind,src=" + container.cacheDirectory + ",dst=/var/cache/overture",
-		"--mount", "type=bind,src=" + container.certPath + ",dst=/tmp/container-test-ca.pem,readonly",
+		"--mount", "type=bind,src=" + container.certPath + ",dst=/etc/ssl/certs/ca-certificates.crt,readonly",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-		"--env", "KO_DATA_PATH=/ko-app",
-		"--env", "SSL_CERT_FILE=/tmp/container-test-ca.pem",
 		"--env", "OVERTURE_LISTEN=:8080",
 		"--env", "OVERTURE_CACHE_DIR=/var/cache/overture",
 		"--env", "OVERTURE_CATALOG_URL=" + container.fixture.baseURL + "/catalog.json",
@@ -325,7 +325,7 @@ func (container *serviceContainer) start() {
 		"--env", "OVERTURE_CACHE_MAX_BYTES=16777216",
 		"--env", "OVERTURE_CACHE_MAX_ENTRIES=32",
 		"--env", "OVERTURE_SCRATCH_MAX_BYTES=16777216",
-		"--env", "OVERTURE_WORKER_COUNT=2",
+		"--env", "OVERTURE_WORKER_COUNT=" + strconv.Itoa(containerWorkerCount),
 		"--env", "OVERTURE_WORKER_MEMORY_BYTES=134217728",
 		"--env", "OVERTURE_WORKER_THREADS=1",
 		"--env", "OVERTURE_QUEUE_CAPACITY=8",
@@ -335,14 +335,20 @@ func (container *serviceContainer) start() {
 		"--env", "OVERTURE_WRITE_TIMEOUT=5s",
 		container.image,
 	}
-	if output, err := commandOutput("docker", args...); err != nil {
+	if output, err := commandOutput(containerCommand, args...); err != nil {
 		container.t.Fatalf("start service container: %v\n%s", err, output)
 	}
+	output, err := commandOutput(containerCommand, "port", container.name, strconv.Itoa(containerListenPort)+"/tcp")
+	assert.NilError(container.t, err)
+	_, port, err := net.SplitHostPort(strings.TrimSpace(output))
+	assert.NilError(container.t, err)
+	container.hostPort, err = strconv.Atoi(port)
+	assert.NilError(container.t, err)
 }
 
 func (container *serviceContainer) remove() {
 	container.t.Helper()
-	if err := runCommand("docker", "rm", "--force", container.name); err != nil {
+	if err := runCommand(containerCommand, "rm", "--force", container.name); err != nil {
 		container.t.Logf("remove service container: %v", err)
 	}
 }
@@ -369,10 +375,10 @@ func newFixtureServer(t *testing.T) *fixtureServer {
 	fixture := &fixtureServer{
 		t:          t,
 		listener:   listener,
-		baseURL:    "https://host.docker.internal:" + strconv.Itoa(port),
+		baseURL:    "https://" + fixtureHostname + ":" + strconv.Itoa(port),
 		certPath:   certificateFile,
 		release:    fixtureRelease,
-		assetBytes: fixtureFile(t, filepath.Join("..", "testdata", "geoparquet", "places.parquet")),
+		assetBytes: fixtureFile(t, filepath.Join("testdata", "places.parquet")),
 	}
 	keyPair, err := tlsKeyPair(certificate, key)
 	if err != nil {
@@ -455,6 +461,11 @@ func (fixture *fixtureServer) document(requestPath, release string) ([]byte, err
 	} else {
 		fixturePath = strings.Replace(requestPath, "/"+release+"/", "/"+fixtureRelease+"/", 1)
 	}
+	baseName := filepath.Base(fixturePath)
+	parentPath := filepath.Dir(fixturePath)
+	if filepath.Base(parentPath) == strings.TrimSuffix(baseName, ".json") {
+		fixturePath = filepath.Join(filepath.Dir(parentPath), baseName)
+	}
 	fileName := filepath.Join("..", "testdata", "stac", strings.TrimPrefix(fixturePath, "/"))
 	body, err := os.ReadFile(fileName)
 	if err != nil {
@@ -512,7 +523,9 @@ func fetchTile(t *testing.T, client *http.Client, container *serviceContainer, v
 		return nil, ""
 	}
 	defer response.Body.Close()
-	assert.Equal(t, response.StatusCode, wantStatus)
+	if response.StatusCode != wantStatus {
+		t.Fatalf("tile status %d, want %d; logs:\n%s", response.StatusCode, wantStatus, podmanLogs(t, container.name))
+	}
 	body, err := io.ReadAll(response.Body)
 	assert.NilError(t, err)
 	return body, response.Header.Get("ETag")
@@ -567,7 +580,7 @@ func waitForReady(t *testing.T, client *http.Client, endpoint string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("service did not become ready; logs:\n%s", dockerLogs(t, containerName))
+	t.Fatalf("service did not become ready; logs:\n%s", podmanLogs(t, containerName))
 }
 
 func waitForStatus(t *testing.T, client *http.Client, status func() int, want int) {
@@ -586,7 +599,7 @@ func waitForWorkerPID(t *testing.T, name string) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		output, err := commandOutput("docker", "top", name, "-eo", "pid,args")
+		output, err := commandOutput(containerCommand, "top", name, "hpid", "args")
 		if err == nil {
 			for _, line := range strings.Split(output, "\n") {
 				if !strings.Contains(line, "--mode=worker") {
@@ -604,7 +617,7 @@ func waitForWorkerPID(t *testing.T, name string) int {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("service did not start an isolated worker; logs:\n%s", dockerLogs(t, name))
+	t.Fatalf("service did not start an isolated worker; logs:\n%s", podmanLogs(t, name))
 	return 0
 }
 
@@ -613,18 +626,6 @@ func testCell(t testing.TB, resolution int) h3.Cell {
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), resolution)
 	assert.NilError(t, err)
 	return cell
-}
-
-func reservePort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	assert.NilError(t, err)
-	if err != nil {
-		return 0
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	assert.NilError(t, listener.Close())
-	return port
 }
 
 func hostPort(baseURL string) string {
@@ -642,8 +643,8 @@ func fixtureCertificate() ([]byte, []byte, error) {
 	}
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "host.docker.internal"},
-		DNSNames:     []string{"host.docker.internal"},
+		Subject:      pkix.Name{CommonName: fixtureHostname},
+		DNSNames:     []string{fixtureHostname},
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -680,9 +681,9 @@ func killProcess(pid int) error {
 	return nil
 }
 
-func dockerLogs(t *testing.T, name string) string {
+func podmanLogs(t *testing.T, name string) string {
 	t.Helper()
-	output, err := commandOutput("docker", "logs", name)
+	output, err := commandOutput(containerCommand, "logs", name)
 	if err != nil {
 		return fmt.Sprintf("unable to read logs: %v", err)
 	}
@@ -705,8 +706,7 @@ func commandOutput(name string, args ...string) (string, error) {
 
 func fixtureFile(t *testing.T, name string) []byte {
 	t.Helper()
-	path := filepath.Join("..", "testdata", name)
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(name)
 	assert.NilError(t, err)
 	return body
 }

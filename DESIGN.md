@@ -507,7 +507,12 @@ The `Makefile` exposes `lint`, `test`, `build`, `build-linux`, `image`,
 `service-image`, `container-test`, `smoke`, and `hooks` targets. `lint` runs
 `prek run --all-files`, including the pinned standard hooks, `gofmt`, and
 `go vet`; tests remain a separate target. `build-linux` uses the pinned Go
-container toolchain for Linux CGO artifacts. `image` and `smoke` exercise the
+container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
+`build/tools/go.mod`, isolated from application dependencies; Podman runs it
+in Linux and loads its image tarballs. No Docker daemon is required.
+On macOS, build/test/vet select the CGO H3 client; the service remains Linux-only.
+GitHub Actions tests both host architectures on Linux and macOS and gates
+Linux images with smoke and lifecycle tests. `image` and `smoke` exercise the
 bundled native dependency probe. `service-image` packages the same bundled
 extensions with the HTTP service. `container-test` is opt-in and runs a local
 TLS STAC/asset fixture against the service image with a read-only root,

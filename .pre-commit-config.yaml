@@ -25,6 +25,6 @@ repos:
           - go
       - id: go-vet
         name: go vet
-        entry: go vet ./...
+        entry: make vet
         language: system
         pass_filenames: false

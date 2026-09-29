@@ -22,9 +22,14 @@ make test
 make build
 ```
 
-The binaries are `bin/overturetunkki`, `bin/overture-client`, and
-`bin/native-probe`. A local service needs a writable absolute cache directory
-and a Linux-compatible CGO/DuckDB environment, for example:
+On macOS, install Go and Xcode Command Line Tools (`xcode-select --install`).
+`make build` builds `bin/overture-client`; `make test` runs the client tests.
+The client uses CGO for H3 validation and supports Apple Silicon and Intel Macs.
+On Linux these targets build and test the service and native probe as well.
+`make build-client` and `make test-client` select the client on either platform.
+
+The service runs on Linux. A local Linux service needs a writable absolute cache
+directory, for example:
 
 ```sh
 mkdir -p "$PWD/.cache/overture"
@@ -157,7 +162,7 @@ unavailable, so omit the tile or use a deployment with different limits.
 `make image` and `make smoke` build and run the native probe with bundled
 DuckDB `httpfs` and `spatial` extensions. `make service-image` builds the
 HTTP service image. `make container-test` first builds the CLI and service
-image, then runs an opt-in Docker lifecycle test using deterministic local
+image, then runs an opt-in Podman lifecycle test using deterministic local
 STAC and GeoParquet fixtures; it uses a read-only root, a writable bounded
 cache volume, an independent GeoParquet reader, CLI download/304/stale-version
 checks, rollover, outages, worker replacement, and restart. It does not
@@ -165,14 +170,25 @@ contact live S3. Live upstream tests, if added, must remain separately opt-in.
 
 The native image build is pinned in `build/versions.env`: Go 1.27.1, ko
 0.19.1, prek 0.5.4, DuckDB 1.5.5, duckdb-go v2.10505.0, H3 Go v4.5.0, the
-glibc runtime digest, and architecture-specific extension checksums. ko must
-build with `CGO_ENABLED=1` in a Linux builder with a compatible C/C++ toolchain;
-the runtime needs glibc, libstdc++, CA certificates, and a non-root user. The
-extensions are packaged and loaded from a known path, with runtime extension
-installation and downloads disabled. Do not rely on a macOS ko invocation to
-cross-compile this native dependency set. Use `make build-linux` for the
-pinned Linux CGO builder and add arm64 only with verified native linkage and
-extension artifacts.
+glibc runtime digest, and architecture-specific extension checksums.
+Images are built with the pinned `go tool ko` in a Linux Go/C++ builder run
+by Podman, then loaded into Podman's local image store. No standalone ko or
+Docker installation is needed. On macOS, initialize and start a Podman machine
+(`podman machine init`, then `podman machine start`) before running:
+
+```sh
+make service-image
+podman run --rm -p 8080:8080 --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges --user=65532:65532 \
+  --tmpfs /var/cache/overture:rw,uid=65532,gid=65532,size=1g \
+  overturetunkki/service:dev
+```
+
+`make build-linux` builds Linux binaries through the same Podman toolchain.
+Builds default to the host architecture; another `TARGET_ARCH` requires
+Podman emulation support. GitHub Actions checks Linux amd64/arm64 and macOS
+Intel/Apple Silicon clients, and runs Linux image smoke and lifecycle tests.
+The service remains Linux-only; native macOS service builds are unsupported.
 
 Install repository hooks with `make hooks`. See [DESIGN.md](DESIGN.md) for the
 architecture and HTTP contract, and [TODO.md](TODO.md) for the completed

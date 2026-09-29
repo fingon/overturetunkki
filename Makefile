@@ -2,8 +2,12 @@ SHELL := /bin/bash
 
 GO ?= go
 PREK ?= prek
-KO ?= ko
-DOCKER ?= docker
+KO = $(GO) tool -modfile=build/tools/go.mod ko
+PODMAN ?= podman
+include build/versions.env
+BUILDER_IMAGE := docker.io/library/golang:$(GO_VERSION)-bookworm
+LINUX_RUN = $(PODMAN) run --rm --platform linux/$(TARGET_ARCH) --userns=keep-id -e GOCACHE=/go/build-cache -e XDG_CONFIG_HOME=/tmp/config -e GOPATH=/go -v overturetunkki-go:/go -v "$(CURDIR):/src" -w /src $(BUILDER_IMAGE)
+HOST_OS := $(shell $(GO) env GOOS)
 TARGET_ARCH ?= $(shell $(GO) env GOARCH)
 CGO_ENABLED ?= 1
 BIN_DIR ?= bin
@@ -17,48 +21,78 @@ SERVICE_IMAGE_REPO ?= overturetunkki/service
 SERVICE_IMAGE_TAG ?= dev
 SERVICE_IMAGE_REF := $(SERVICE_IMAGE_REPO):$(SERVICE_IMAGE_TAG)
 
-.PHONY: all lint test build build-linux fetch-extensions image service-image container-test smoke hooks clean
+.PHONY: test-linux test-darwin image-linux service-image-linux all lint test test-client build build-client build-native build-linux fetch-extensions image service-image container-test smoke hooks clean
 
 all: test
 
 lint:
 	$(PREK) run --all-files
 
-test:
+test: test-$(HOST_OS)
+
+test-linux:
 	$(GO) test ./...
 
-build:
+test-darwin: test-client
+
+test-client:
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) test ./cmd/overture-client ./internal/client ./internal/logging
+
+build: build-client
+ifeq ($(HOST_OS),linux)
+build: build-native
+endif
+
+build-client:
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(CLIENT_BIN) ./cmd/overture-client
+
+build-native:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(SERVICE_BIN) ./cmd/overturetunkki
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(CLIENT_BIN) ./cmd/overture-client
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -o $(NATIVE_PROBE_BIN) ./cmd/native-probe
 
 build-linux:
-	mkdir -p $(BIN_DIR)/linux-$(TARGET_ARCH)
-	$(DOCKER) buildx build --platform linux/$(TARGET_ARCH) \
-		--build-arg GO_VERSION=$$(awk -F= '$$1 == "GO_VERSION" { print $$2 }' build/versions.env) \
-		--output type=local,dest=$(BIN_DIR)/linux-$(TARGET_ARCH) \
-		-f build/native-linux.Dockerfile .
+	$(LINUX_RUN) make build BIN_DIR=$(BIN_DIR)/linux-$(TARGET_ARCH)
 
 fetch-extensions:
 	./scripts/fetch-duckdb-extensions $(TARGET_ARCH)
 
-image: fetch-extensions
-	KO_DOCKER_REPO=$(IMAGE_REPO) $(KO) build --local --bare --tags $(IMAGE_TAG) ./cmd/native-probe
+image:
+	$(LINUX_RUN) make image-linux BIN_DIR=$(BIN_DIR) TARGET_ARCH=$(TARGET_ARCH) IMAGE_REPO=$(IMAGE_REPO) IMAGE_TAG=$(IMAGE_TAG)
+	$(PODMAN) load -i $(BIN_DIR)/native-probe.tar
 
-service-image: fetch-extensions
-	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --local --bare --tags $(SERVICE_IMAGE_TAG) ./cmd/overturetunkki
+service-image:
+	$(LINUX_RUN) make service-image-linux BIN_DIR=$(BIN_DIR) TARGET_ARCH=$(TARGET_ARCH) SERVICE_IMAGE_REPO=$(SERVICE_IMAGE_REPO) SERVICE_IMAGE_TAG=$(SERVICE_IMAGE_TAG)
+	$(PODMAN) load -i $(BIN_DIR)/service.tar
 
-container-test: service-image build
-	OVERTURE_CONTAINER_TEST=1 OVERTURE_SERVICE_IMAGE=$(SERVICE_IMAGE_REF) OVERTURE_CLIENT_BIN=$(abspath $(CLIENT_BIN)) $(GO) test ./integration -run '^TestContainerLifecycle$$' -count=1
+image-linux: fetch-extensions
+	mkdir -p $(BIN_DIR)
+	KO_DOCKER_REPO=$(IMAGE_REPO) $(KO) build --platform linux/$(TARGET_ARCH) --push=false --bare --tags $(IMAGE_TAG) --tarball $(BIN_DIR)/native-probe.tar ./cmd/native-probe
+
+service-image-linux: fetch-extensions
+	mkdir -p $(BIN_DIR)
+	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --platform linux/$(TARGET_ARCH) --push=false --bare --tags $(SERVICE_IMAGE_TAG) --tarball $(BIN_DIR)/service.tar ./cmd/overturetunkki
+
+container-test: service-image build-client
+	mkdir -p $(BIN_DIR)/container-tmp
+	TMPDIR=$(abspath $(BIN_DIR)/container-tmp) OVERTURE_CONTAINER_TEST=1 OVERTURE_SERVICE_IMAGE=$(SERVICE_IMAGE_REF) OVERTURE_CLIENT_BIN=$(abspath $(CLIENT_BIN)) $(GO) test ./integration -run '^TestContainerLifecycle$$' -count=1
 
 smoke: image
-	$(DOCKER) run --rm --network=none --read-only --cap-drop=ALL \
+	$(PODMAN) run --rm --network=none --read-only --cap-drop=ALL \
 		--security-opt=no-new-privileges --user=65532:65532 \
-		--env KO_DATA_PATH=/ko-app $(IMAGE_REF)
+		$(IMAGE_REF)
 
 hooks:
 	$(PREK) install
 
 clean:
 	rm -rf $(BIN_DIR)
+
+.PHONY: vet
+vet:
+ifeq ($(HOST_OS),linux)
+	$(GO) vet ./...
+else
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) vet ./cmd/overture-client ./internal/client ./internal/logging
+endif

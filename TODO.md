@@ -123,3 +123,6 @@ items below are pending;
   limits, client refinement, attribution, and native ko build requirements.
 - [x] Keep code, tests, DESIGN.md, README.md, and this backlog synchronized.
   Run Makefile lint/test/build and relevant image checks before completion.
+
+- [x] Support native macOS clients, Linux Podman builds with ko as a Go tool,
+  and GitHub Actions host and container checks for amd64 and arm64.

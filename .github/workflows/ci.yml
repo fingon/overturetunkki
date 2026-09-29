@@ -10,7 +10,11 @@ permissions:
 jobs:
   go:
     name: Go checks
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -37,58 +41,24 @@ jobs:
         run: make test
       - name: Build host binaries
         run: make build
-      - name: Set up Linux builder
-        uses: docker/setup-buildx-action@v3
-      - name: Build Linux artifacts
-        run: make build-linux TARGET_ARCH=amd64
 
-  native-image-amd64:
-    name: Native image smoke (amd64)
-    runs-on: ubuntu-24.04
+  containers:
+    name: Linux Podman images
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Read pinned tool versions
-        id: versions
-        shell: bash
-        run: |
-          source build/versions.env
-          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "ko=$KO_VERSION" >> "$GITHUB_OUTPUT"
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: ${{ steps.versions.outputs.go }}
-          cache: true
-      - name: Install pinned ko
-        run: |
-          go install "github.com/google/ko@${{ steps.versions.outputs.ko }}"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Build and smoke-test the amd64 image
-        run: make smoke TARGET_ARCH=amd64 IMAGE_TAG=ci-${GITHUB_SHA}
-
-  native-image-arm64:
-    name: Native image smoke (arm64)
-    needs: native-image-amd64
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Read pinned tool versions
-        id: versions
-        shell: bash
-        run: |
-          source build/versions.env
-          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "ko=$KO_VERSION" >> "$GITHUB_OUTPUT"
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ steps.versions.outputs.go }}
-          cache: true
-      - name: Install pinned ko
-        run: |
-          go install "github.com/google/ko@${{ steps.versions.outputs.ko }}"
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Build and smoke-test the arm64 image
-        run: make smoke TARGET_ARCH=arm64 IMAGE_TAG=ci-${GITHUB_SHA}
+          go-version-file: go.mod
+      - name: Install Podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build Linux binaries
+        run: make build-linux
+      - name: Build and smoke-test native image
+        run: make smoke
+      - name: Test service lifecycle
+        run: make container-test
