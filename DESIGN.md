@@ -7,8 +7,7 @@ H3 filtering, worker cell/projection validation and bounded candidate query,
 worker runtime/output validation, cache ownership/admission and keyed job
 scheduling, the HTTP endpoint contract, GeoParquet writer compatibility, typed
 command configuration, catalog validation, catalog observation, service wiring,
-and the opt-in container harness are implemented; the CLI remains under
-construction.
+the CLI testing client, and the opt-in container harness are implemented.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other

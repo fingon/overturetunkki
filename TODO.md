@@ -118,8 +118,8 @@ items below are pending;
 
 ## 8. Delivery documentation
 
-- [ ] Replace README's design-only status with real build/run/client examples
+- [x] Replace README's design-only status with real build/run/client examples
   when implemented. Document every flag/env override, resource sizing, freshness
   limits, client refinement, attribution, and native ko build requirements.
-- [ ] Keep code, tests, DESIGN.md, README.md, and this backlog synchronized.
+- [x] Keep code, tests, DESIGN.md, README.md, and this backlog synchronized.
   Run Makefile lint/test/build and relevant image checks before completion.
