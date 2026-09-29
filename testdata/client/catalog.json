@@ -1,0 +1,1 @@
+{"release":"2026-09-23.1","catalog_version":"2026-09-23.1+sha256:test","projection_id":"sha256:projection","fields":["id","geometry"],"max_tile_bytes":1024,"max_tile_rows":10,"supported_h3_resolutions":[0,1],"attribution":["https://overturemaps.org"]}

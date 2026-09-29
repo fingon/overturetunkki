@@ -107,7 +107,7 @@ items below are pending;
 - [x] Provide stdout JSON results, stderr diagnostics, documented exit codes,
   bounded error-body parsing, and actionable 409/422/503/504 messages, including
   resolution-15 and boundary-cell refinement guidance.
-- [ ] Add table-driven httptest coverage for discovery/download, explicit stale
+- [x] Add table-driven httptest coverage for discovery/download, explicit stale
   versions, 304 with no file mutation, oversized tiles, malformed responses,
   missing/mismatched headers, truncated/over-limit bodies, checksum failures,
   timeout/cancellation, cleanup errors, and preservation of existing files.

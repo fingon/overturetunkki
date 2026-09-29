@@ -194,6 +194,22 @@ func TestDownloadTileResponseBoundsErrorBody(t *testing.T) {
 	assert.Assert(t, errors.As(err, &httpErr))
 }
 
+func TestDownloadTileResponseReportsCleanupFailure(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "tile.parquet")
+	response := testDownloadResponse([]byte("PAR1tilePAR1"))
+	response.Header.Set("ETag", `"sha256:`+strings.Repeat("0", 64)+`"`)
+	removeTemporary := func(path string) error {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return errors.New("cleanup denied")
+	}
+
+	_, err := downloadTileResponse(context.Background(), response, testDownloadOptions(destination), removeTemporary)
+	assert.ErrorContains(t, err, "cleanup denied")
+	assertNoPartialTile(t, destination)
+}
+
 func testDownloadOptions(destination string) DownloadOptions {
 	return DownloadOptions{
 		Destination:            destination,

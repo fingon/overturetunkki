@@ -1,0 +1,1 @@
+{"code":"tile_too_large","message":"tile exceeds the compressed byte limit","retryable":false,"cell":"8928308280fffff","resolution":9,"max_tile_bytes":1024,"failed_limit":"compressed_bytes","suggested_resolution":10,"can_refine":true,"guidance":"cover the viewport or original cell with all intersecting finer cells and deduplicate POI ids"}

@@ -43,6 +43,10 @@ type DownloadResult struct {
 }
 
 func DownloadTileResponse(ctx context.Context, response *http.Response, options DownloadOptions) (result DownloadResult, err error) {
+	return downloadTileResponse(ctx, response, options, os.Remove)
+}
+
+func downloadTileResponse(ctx context.Context, response *http.Response, options DownloadOptions, removeTemporary func(string) error) (result DownloadResult, err error) {
 	if ctx == nil {
 		return DownloadResult{}, fmt.Errorf("download tile: context is nil")
 	}
@@ -113,7 +117,7 @@ func DownloadTileResponse(ctx context.Context, response *http.Response, options 
 		if published {
 			return
 		}
-		if cleanupErr := os.Remove(temporaryPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+		if cleanupErr := removeTemporary(temporaryPath); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
 			if err == nil {
 				err = fmt.Errorf("remove temporary tile: %w", cleanupErr)
 				return
