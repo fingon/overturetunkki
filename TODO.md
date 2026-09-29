@@ -49,7 +49,7 @@ observation. Remaining items below are pending;
 
 ## 4. Tile worker
 
-- [ ] Validate canonical H3 cells and selected source columns. Require id and
+- [x] Validate canonical H3 cells and selected source columns. Require id and
   geometry; quote identifiers and bind values; prohibit arbitrary client SQL.
 - [ ] Query pinned S3 assets using bbox/projection pushdown and exact H3
   membership. Fail visibly on invalid geometry. Materialize only the configured
