@@ -3,9 +3,9 @@
 ## Status and scope
 
 This document specifies the implementation. The native dependency, image build,
-H3 filtering, worker output-limit, GeoParquet writer compatibility, and typed
-command configuration gates are implemented; the HTTP service and CLI remain
-under construction.
+H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
+command configuration, and catalog validation gates are implemented; the HTTP
+service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
 bounded disk LRU. The initial dataset is `theme=places/type=place`; other
@@ -77,6 +77,22 @@ validators, not treated as content checksums because the observed multipart
 ETags are not portable digest identities. The fixture's canonical input hashes
 the trusted URL manifest and the selected schema metadata, with the expected
 digest recorded in `testdata/stac/version.json`.
+
+`internal/catalog` revalidates the root latest pointer, selected release,
+places catalog, collection, and every partition item under one timeout. It
+accepts only HTTPS links on the configured catalog host and AWS asset host,
+requires the published `theme=places/type=place` prefix, and ignores alternate
+providers. Response bodies are bounded; ETags and Last-Modified values are
+retained for conditional revalidation, and a `304` is accepted only when a
+cached body exists. Missing or incompatible collection metadata, selected
+columns, partition links, bounds, or asset identities fail the refresh without
+returning a prior snapshot.
+
+Catalog and projection identities use compact canonical JSON with sorted object
+keys, contract-ordered arrays, and a trailing LF before SHA-256 hashing. The
+catalog hash includes the release, selected asset provider, sorted manifest,
+and validated schema; the projection hash includes ordered selected columns,
+their resolved metadata, H3 semantics, and the GeoParquet writer revision.
 
 Freshness is fail closed and checked on every tile request, including cache
 hits, negative hits, conditional requests, and range requests. Fetch the latest
@@ -391,7 +407,7 @@ These defaults are starting points to validate with representative POIs.
 | `--catalog-url` | `https://stac.overturemaps.org/catalog.json` | Trusted catalog endpoint. |
 | `--catalog-poll-interval` | `1m` | Additional idle refresh. |
 | `--catalog-timeout` | `10s` | Deadline for a complete freshness check. |
-| `--fields` | `id,geometry,names,categories` | Output projection. |
+| `--fields` | `id,geometry,names,basic_category` | Output projection. |
 | `--max-tile-bytes` | `8388608` | Maximum complete zstd Parquet size, 8 MiB. |
 | `--max-tile-rows` | `100000` | Additional early rejection threshold. |
 | `--cache-dir` | `/var/cache/overture` | Exclusive writable cache root. |

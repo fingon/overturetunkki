@@ -19,8 +19,8 @@ collection. Object ETags are recorded as HTTP validators but are not included
 in the version input because multipart ETags are not content checksums and
 silent in-place object mutation is outside the release contract. The expected
 SHA-256 and example `catalog_version` are in `version.json`; canonical JSON
-uses compact UTF-8 with lexicographically sorted object keys and explicitly
-ordered arrays.
+uses compact UTF-8 with lexicographically sorted object keys, explicitly
+ordered arrays, and one trailing LF.
 
 This capture confirms the published hierarchy and validators; it cannot prove
 that a future release object is immutable. The catalog manager therefore treats

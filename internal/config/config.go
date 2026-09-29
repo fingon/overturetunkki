@@ -45,7 +45,7 @@ type Config struct {
 	CatalogURL           string        `name:"catalog-url" env:"OVERTURE_CATALOG_URL" default:"https://stac.overturemaps.org/catalog.json" help:"Trusted STAC catalog endpoint."`
 	CatalogPollInterval  time.Duration `name:"catalog-poll-interval" env:"OVERTURE_CATALOG_POLL_INTERVAL" default:"1m" help:"Additional idle catalog refresh interval."`
 	CatalogTimeout       time.Duration `name:"catalog-timeout" env:"OVERTURE_CATALOG_TIMEOUT" default:"10s" help:"Complete catalog freshness-check deadline."`
-	Fields               []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,categories" sep:"," help:"Comma-separated top-level output fields."`
+	Fields               []string      `name:"fields" env:"OVERTURE_FIELDS" default:"id,geometry,names,basic_category" sep:"," help:"Comma-separated top-level output fields."`
 	MaxTileBytes         int64         `name:"max-tile-bytes" env:"OVERTURE_MAX_TILE_BYTES" default:"8388608" help:"Maximum complete zstd Parquet tile size in bytes."`
 	MaxTileRows          int64         `name:"max-tile-rows" env:"OVERTURE_MAX_TILE_ROWS" default:"100000" help:"Additional early tile row rejection threshold."`
 	CacheDir             string        `name:"cache-dir" env:"OVERTURE_CACHE_DIR" default:"/var/cache/overture" help:"Exclusive writable cache root."`

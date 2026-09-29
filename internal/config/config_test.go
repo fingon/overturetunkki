@@ -19,7 +19,7 @@ func TestParseDefaults(t *testing.T) {
 	assert.Equal(t, cfg.CatalogURL, DefaultCatalogURL)
 	assert.Equal(t, cfg.CatalogPollInterval, DefaultCatalogPollInterval)
 	assert.Equal(t, cfg.CatalogTimeout, DefaultCatalogTimeout)
-	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names", "categories"})
+	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names", "basic_category"})
 	assert.Equal(t, cfg.MaxTileBytes, DefaultMaxTileBytes)
 	assert.Equal(t, cfg.MaxTileRows, DefaultMaxTileRows)
 	assert.Equal(t, cfg.CacheDir, DefaultCacheDir)
