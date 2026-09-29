@@ -112,7 +112,7 @@ items below are pending;
   missing/mismatched headers, truncated/over-limit bodies, checksum failures,
   timeout/cancellation, cleanup errors, and preservation of existing files.
   Store response fixtures/goldens in testdata/.
-- [ ] Build the CLI through Makefile build, run its tests through Makefile test,
+- [x] Build the CLI through Makefile build, run its tests through Makefile test,
   and exercise it against the container in smoke tests. Independently inspect
   downloaded GeoParquet; keep live upstream tests opt-in.
 

@@ -49,8 +49,8 @@ image: fetch-extensions
 service-image: fetch-extensions
 	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --local --bare --tags $(SERVICE_IMAGE_TAG) ./cmd/overturetunkki
 
-container-test: service-image
-	OVERTURE_CONTAINER_TEST=1 OVERTURE_SERVICE_IMAGE=$(SERVICE_IMAGE_REF) $(GO) test ./integration -run '^TestContainerLifecycle$$' -count=1
+container-test: service-image build
+	OVERTURE_CONTAINER_TEST=1 OVERTURE_SERVICE_IMAGE=$(SERVICE_IMAGE_REF) OVERTURE_CLIENT_BIN=$(abspath $(CLIENT_BIN)) $(GO) test ./integration -run '^TestContainerLifecycle$$' -count=1
 
 smoke: image
 	$(DOCKER) run --rm --network=none --read-only --cap-drop=ALL \

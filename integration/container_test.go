@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -38,6 +39,7 @@ const (
 	rolloverRelease     = "2026-09-24.0"
 	containerImageEnv   = "OVERTURE_SERVICE_IMAGE"
 	containerTestEnv    = "OVERTURE_CONTAINER_TEST"
+	clientBinaryEnv     = "OVERTURE_CLIENT_BIN"
 	containerName       = "overturetunkki-container-test"
 	containerListenPort = 8080
 )
@@ -78,6 +80,13 @@ func TestContainerLifecycle(t *testing.T) {
 	if err := runCommand("docker", "image", "inspect", image); err != nil {
 		t.Fatalf("inspect service image %q: %v", image, err)
 	}
+	clientBinary := os.Getenv(clientBinaryEnv)
+	if clientBinary == "" {
+		clientBinary = filepath.Join("..", "bin", "overture-client")
+	}
+	if _, err := os.Stat(clientBinary); err != nil {
+		t.Fatalf("inspect CLI binary %q: %v; run make build first", clientBinary, err)
+	}
 
 	fixture := newFixtureServer(t)
 	cacheDirectory := t.TempDir()
@@ -94,6 +103,35 @@ func TestContainerLifecycle(t *testing.T) {
 	cell := testCell(t, 9)
 	tileBody, tileETag := fetchTile(t, client, container, oldCatalog.CatalogVersion, cell, http.StatusOK)
 	validateTile(t, tileBody)
+
+	t.Run("CLI download and conditional response", func(t *testing.T) {
+		outputPath := filepath.Join(t.TempDir(), "tile.parquet")
+		stdout, stderr, err := runCLI(t, clientBinary, "--server-url="+container.url(""), "--timeout=30s", "tile", cell.String(), "--output="+outputPath)
+		assert.NilError(t, err, string(stderr))
+		if err != nil {
+			return
+		}
+		var result cliTileResult
+		assert.NilError(t, json.Unmarshal(stdout, &result))
+		assert.Equal(t, result.Status, http.StatusOK)
+		assert.Equal(t, result.CatalogVersion, oldCatalog.CatalogVersion)
+		downloadedBody, readErr := os.ReadFile(outputPath)
+		assert.NilError(t, readErr)
+		assert.DeepEqual(t, downloadedBody, tileBody)
+		validateTile(t, downloadedBody)
+
+		stdout, stderr, err = runCLI(t, clientBinary, "--server-url="+container.url(""), "--timeout=30s", "tile", cell.String(), "--if-none-match="+tileETag, "--output="+outputPath)
+		assert.NilError(t, err, string(stderr))
+		if err != nil {
+			return
+		}
+		assert.NilError(t, json.Unmarshal(stdout, &result))
+		assert.Equal(t, result.Status, http.StatusNotModified)
+		assert.Assert(t, result.NotModified)
+		unchangedBody, readErr := os.ReadFile(outputPath)
+		assert.NilError(t, readErr)
+		assert.DeepEqual(t, unchangedBody, downloadedBody)
+	})
 
 	t.Run("concurrent clients", func(t *testing.T) {
 		const clientCount = 8
@@ -149,6 +187,19 @@ func TestContainerLifecycle(t *testing.T) {
 	}, http.StatusConflict)
 	newCatalog := fetchCatalog(t, client, container.url("/v1/catalog"))
 	assert.Equal(t, newCatalog.Release, rolloverRelease)
+	t.Run("CLI reports stale catalog version", func(t *testing.T) {
+		outputPath := filepath.Join(t.TempDir(), "stale.parquet")
+		_, stderr, err := runCLI(t, clientBinary, "--server-url="+container.url(""), "--timeout=30s", "tile", cell.String(), "--catalog-version="+oldCatalog.CatalogVersion, "--output="+outputPath)
+		assert.Assert(t, err != nil, string(stderr))
+		var exitErr *exec.ExitError
+		assert.Assert(t, errors.As(err, &exitErr), string(stderr))
+		if exitErr != nil {
+			assert.Equal(t, exitErr.ExitCode(), 3)
+		}
+		assert.Assert(t, strings.Contains(string(stderr), "current catalog version"), string(stderr))
+		_, statErr := os.Stat(outputPath)
+		assert.Assert(t, os.IsNotExist(statErr))
+	})
 	newBody, _ := fetchTile(t, client, container, newCatalog.CatalogVersion, cell, http.StatusOK)
 	validateTile(t, newBody)
 
@@ -225,6 +276,12 @@ type serviceContainer struct {
 	certPath       string
 	name           string
 	hostPort       int
+}
+
+type cliTileResult struct {
+	Status         int    `json:"status"`
+	CatalogVersion string `json:"catalog_version"`
+	NotModified    bool   `json:"not_modified"`
 }
 
 func newServiceContainer(t *testing.T, image string, fixture *fixtureServer, cacheDirectory string) *serviceContainer {
@@ -482,6 +539,18 @@ func validateTile(t *testing.T, body []byte) {
 	if err == nil {
 		assert.Assert(t, validation.SizeBytes > 0)
 	}
+}
+
+func runCLI(t *testing.T, binary string, args ...string) ([]byte, []byte, error) {
+	t.Helper()
+	context, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	command := exec.CommandContext(context, binary, args...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 func waitForReady(t *testing.T, client *http.Client, endpoint string) {
