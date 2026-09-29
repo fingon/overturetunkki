@@ -3,8 +3,8 @@
 The repository contains the design and the completed native dependency build,
 H3 filtering, bounded worker query/output validation, GeoParquet writer
 compatibility, typed command configuration, CI build gates, catalog validation,
-catalog observation, and cache ownership/admission and persistence primitives.
-Remaining items below are pending;
+catalog observation, cache ownership/admission and persistence primitives, and
+the tested HTTP endpoint contract. Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -78,7 +78,7 @@ Remaining items below are pending;
 
 ## 6. HTTP and operations
 
-- [ ] Implement catalog/tile/health/metrics endpoints and the documented JSON
+- [x] Implement catalog/tile/health/metrics endpoints and the documented JSON
   errors, version headers, ETags, freshness checks, and cache-control policy.
   Require catalog_version; ignore ranges initially; revalidate before 304.
 - [ ] Implement finer-resolution guidance and resolution-15 terminal errors.

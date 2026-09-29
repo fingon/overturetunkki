@@ -10,9 +10,9 @@ catalog versions, download tiles, and exercise API error handling.
 pruning, validated worker projections and bounded candidate queries, worker
 runtime/output validation, GeoParquet 1.1 writer compatibility, typed
 supervisor/worker configuration, deadline-bound STAC catalog validation and
-observation, and cache ownership/admission/persistence and bounded scratch/
-negative-cache primitives are implemented; server and client implementation
-are in progress.
+observation, cache ownership/admission/persistence and bounded scratch/
+negative-cache primitives, and the tested HTTP endpoint contract are
+implemented; service wiring and client implementation are in progress.
 
 The native probe verifies the pinned CGO libraries and bundled DuckDB `httpfs`
 and `spatial` extensions in a non-root, network-disabled image. It uses
