@@ -3,8 +3,9 @@
 ## Status and scope
 
 This document specifies the implementation. The native dependency, image build,
-H3 filtering, worker output-limit, GeoParquet writer compatibility, typed
-command configuration, catalog validation, and catalog observation gates are
+H3 filtering, worker cell/projection validation and bounded candidate query,
+worker output-limit, GeoParquet writer compatibility, typed command
+configuration, catalog validation, and catalog observation gates are
 implemented; the HTTP service and CLI remain under construction.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
@@ -294,10 +295,15 @@ geometry encoding, H3 semantics version, and writer-format revision.
 Read only pinned places assets through DuckDB `httpfs`; use projection and bbox
 predicate pushdown. Convert geometry to the pinned DuckDB geometry type and
 apply exact H3 membership. Materialize at most `max_tile_rows + 1` matching rows
-in bounded worker scratch. If the extra row exists, reject immediately without
-sorting or serializing the whole cell. This row limit is an explicit additional
-admission limit, not an estimate of compressed bytes. LIMIT avoids full result
-materialization but does not guarantee cheap S3 scans or early completion.
+in bounded worker scratch. `internal/worker` now builds this statement only
+from the validated catalog manifest and projection, binds all URLs and scalar
+values, rejects null or non-point geometries through the query, and materializes
+the bounded result in a temporary table. If the extra row exists, reject
+immediately without sorting or serializing the whole cell; otherwise COPY that
+table as one complete zstd GeoParquet file. This row limit is an explicit
+additional admission limit, not an estimate of compressed bytes. LIMIT avoids
+full result materialization but does not guarantee cheap S3 scans or early
+completion.
 
 For admitted rows, use DuckDB `COPY (SELECT <projection> FROM candidate)` to a
 single staging file with `FORMAT PARQUET, COMPRESSION ZSTD`. Do not split output

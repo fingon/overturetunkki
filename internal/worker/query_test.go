@@ -1,7 +1,10 @@
 package worker
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -92,6 +95,159 @@ func TestBuildQueryPlanRejectsUntrustedProjectionInput(t *testing.T) {
 			assert.ErrorContains(t, err, test.message)
 			assert.Assert(t, errors.Is(err, ErrInvalidProjection))
 		})
+	}
+}
+
+func TestBuildCandidateQueryBindsManifestAndFiltersExactly(t *testing.T) {
+	cell := testCell(t)
+	snapshot := testSnapshot()
+	plan, err := BuildQueryPlan(TileRequest{Cell: cell.String()}, []string{"id", "geometry", "names"}, snapshot.Schema)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	query, err := BuildCandidateQuery(plan, snapshot, 7)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	assert.Assert(t, strings.Contains(query.SQL, "FROM read_parquet([?, ?])"), query.SQL)
+	assert.Assert(t, strings.Contains(query.SQL, `ST_AsWKB("geometry") AS "geometry"`), query.SQL)
+	assert.Assert(t, strings.Contains(query.SQL, "ST_GeometryType(\"geometry\")"), query.SQL)
+	assert.Assert(t, strings.Contains(query.SQL, "h3_cell_contains"), query.SQL)
+	assert.Assert(t, strings.Contains(query.SQL, "LIMIT ?"), query.SQL)
+	assert.Assert(t, !strings.Contains(query.SQL, snapshot.Manifest[0].Href), query.SQL)
+	assert.Equal(t, query.Args[0], snapshot.Manifest[0].Href)
+	assert.Equal(t, query.Args[1], snapshot.Manifest[1].Href)
+	assert.Equal(t, query.Args[len(query.Args)-2], uint64(cell))
+	assert.Equal(t, query.Args[len(query.Args)-1], int64(8))
+}
+
+func TestBuildCandidateQueryRejectsUntrustedManifest(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*catalog.Snapshot)
+		message string
+	}{
+		{name: "empty manifest", mutate: func(snapshot *catalog.Snapshot) { snapshot.Manifest = nil }, message: "manifest is empty"},
+		{name: "wrong host", mutate: func(snapshot *catalog.Snapshot) {
+			snapshot.Manifest[0].Href = "https://example.com/release/test/theme=places/type=place/part-00000-a.zstd.parquet"
+		}, message: "trusted HTTPS asset"},
+		{name: "query string", mutate: func(snapshot *catalog.Snapshot) { snapshot.Manifest[0].Href += "?version=1" }, message: "trusted HTTPS asset"},
+		{name: "wrong path", mutate: func(snapshot *catalog.Snapshot) {
+			snapshot.Manifest[0].Href = strings.Replace(snapshot.Manifest[0].Href, "/theme=places/", "/theme=building/", 1)
+		}, message: "trusted places prefix"},
+		{name: "repeated URL", mutate: func(snapshot *catalog.Snapshot) {
+			snapshot.Manifest[1].PartitionID = snapshot.Manifest[0].PartitionID
+			snapshot.Manifest[1].Href = snapshot.Manifest[0].Href
+		}, message: "URL is repeated"},
+		{name: "invalid metadata", mutate: func(snapshot *catalog.Snapshot) { snapshot.Manifest[0].SizeBytes = 0 }, message: "metadata is invalid"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := testSnapshot()
+			test.mutate(&snapshot)
+			plan, err := BuildQueryPlan(TileRequest{Cell: testCell(t).String()}, []string{"id", "geometry"}, snapshot.Schema)
+			assert.NilError(t, err)
+			if err != nil {
+				return
+			}
+			_, err = BuildCandidateQuery(plan, snapshot, 1)
+			assert.ErrorContains(t, err, test.message)
+		})
+	}
+}
+
+func TestBuildCandidateQueryValidatesRowLimit(t *testing.T) {
+	plan, err := BuildQueryPlan(TileRequest{Cell: testCell(t).String()}, []string{"id", "geometry"}, testSnapshot().Schema)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	for _, maxRows := range []int64{-1, int64(1<<63 - 1)} {
+		_, err := BuildCandidateQuery(plan, testSnapshot(), maxRows)
+		assert.ErrorContains(t, err, "candidate row limit")
+	}
+}
+
+func TestMaterializeCandidatesUsesOnlyTheConfiguredRowAllowance(t *testing.T) {
+	connection := openDuckDBConnection(t)
+	query := PreparedQuery{
+		SQL:  "SELECT i::BIGINT AS id, repeat('x', 1) AS geometry FROM range(?) AS source(i)",
+		Args: []any{int64(3)},
+	}
+	_, err := materializeCandidates(context.Background(), connection, query, 2)
+	assert.Assert(t, errors.Is(err, ErrTooManyRows))
+	assert.ErrorContains(t, err, "produced 3 rows")
+	var count int64
+	err = connection.QueryRowContext(context.Background(), "SELECT count(*) FROM "+candidateTableName).Scan(&count)
+	assert.Assert(t, err != nil)
+
+	query.Args = []any{int64(2)}
+	rows, err := materializeCandidates(context.Background(), connection, query, 2)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { assert.NilError(t, rows.drop(context.Background(), connection)) })
+	assert.Equal(t, rows.rowCount, int64(2))
+	err = connection.QueryRowContext(context.Background(), "SELECT count(*) FROM "+candidateTableName).Scan(&count)
+	assert.NilError(t, err)
+	assert.Equal(t, count, int64(2))
+}
+
+func TestCandidateMetadataUsesConservativeCellBounds(t *testing.T) {
+	plan, err := BuildQueryPlan(TileRequest{Cell: testCell(t).String()}, []string{"id", "geometry"}, testSnapshot().Schema)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	encoded, err := candidateMetadata(plan)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	var metadata geoparquet.GeoMetadata
+	assert.NilError(t, json.Unmarshal(encoded, &metadata))
+	geometry, ok := metadata.Columns[geoparquet.GeometryColumnName]
+	assert.Assert(t, ok)
+	if !ok {
+		return
+	}
+	assert.Equal(t, metadata.Version, geoparquet.GeoParquetVersion)
+	assert.Equal(t, metadata.PrimaryColumn, geoparquet.GeometryColumnName)
+	assert.Equal(t, geometry.Encoding, geoparquet.WKBEncoding)
+	assert.Equal(t, len(geometry.BBox), 4)
+	assert.Assert(t, geometry.BBox[0] < geometry.BBox[2])
+	assert.Assert(t, geometry.BBox[1] < geometry.BBox[3])
+}
+
+func testSnapshot() catalog.Snapshot {
+	return catalog.Snapshot{
+		Release:        "2026-09-23.1",
+		CatalogVersion: "2026-09-23.1+sha256:test",
+		CollectionID:   catalog.DefaultCollectionID,
+		Manifest: []catalog.Asset{
+			{
+				PartitionID:   "00000",
+				Href:          fmt.Sprintf("https://%s/release/2026-09-23.1/theme=places/type=place/part-00000-a%s", catalog.DefaultAssetHost, assetPathSuffix),
+				RowCount:      10,
+				RowGroupCount: 1,
+				SizeBytes:     100,
+			},
+			{
+				PartitionID:   "00001",
+				Href:          fmt.Sprintf("https://%s/release/2026-09-23.1/theme=places/type=place/part-00001-b%s", catalog.DefaultAssetHost, assetPathSuffix),
+				RowCount:      20,
+				RowGroupCount: 2,
+				SizeBytes:     200,
+			},
+		},
+		Schema: catalog.Schema{
+			Columns:           []catalog.Column{{Name: "id"}, {Name: "geometry"}, {Name: "names"}},
+			GeoParquetVersion: "1.1.0",
+			PrimaryGeometry:   geoparquet.GeometryColumnName,
+		},
 	}
 }
 

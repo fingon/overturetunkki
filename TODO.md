@@ -51,7 +51,7 @@ observation. Remaining items below are pending;
 
 - [x] Validate canonical H3 cells and selected source columns. Require id and
   geometry; quote identifiers and bind values; prohibit arbitrary client SQL.
-- [ ] Query pinned S3 assets using bbox/projection pushdown and exact H3
+- [x] Query pinned S3 assets using bbox/projection pushdown and exact H3
   membership. Fail visibly on invalid geometry. Materialize only the configured
   row allowance plus one, then reject or COPY a complete zstd GeoParquet file.
 - [ ] Apply worker memory/thread/deadline settings, scratch allocations, and
