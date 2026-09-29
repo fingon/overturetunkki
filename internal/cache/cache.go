@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -18,7 +20,9 @@ const (
 	filesDirectory   = "files"
 	stagingDirectory = "staging"
 	fileSuffix       = ".parquet"
+	sidecarSuffix    = ".json"
 	stagingPrefix    = ".tile-"
+	maxSidecarBytes  = 1024 * 1024
 )
 
 var (
@@ -28,6 +32,8 @@ var (
 	ErrInvalidReservation  = errors.New("cache reservation is invalid")
 	ErrQueueFull           = errors.New("cache job queue is full")
 	ErrSchedulerClosed     = errors.New("cache scheduler is closed")
+	ErrEntryNotFound       = errors.New("cache entry was not found")
+	ErrEntryPinned         = errors.New("cache entry is pinned")
 )
 
 type Key struct {
@@ -50,6 +56,29 @@ type Stats struct {
 	ReservedEntries int64
 }
 
+type Entry struct {
+	Key         Key
+	Path        string
+	SidecarPath string
+	SizeBytes   int64
+	Digest      string
+	LastAccess  time.Time
+}
+
+type sidecarMetadata struct {
+	Key              Key    `json:"key"`
+	SizeBytes        int64  `json:"size_bytes"`
+	Digest           string `json:"digest"`
+	LastAccessUnixNS int64  `json:"last_access_unix_ns"`
+}
+
+type cacheEntry struct {
+	Entry
+	readers int
+	dirty   bool
+	element *list.Element
+}
+
 type Cache struct {
 	root       string
 	lockFile   *os.File
@@ -62,6 +91,9 @@ type Cache struct {
 	reservedBytes   int64
 	usedEntries     int64
 	reservedEntries int64
+	entries         map[string]*cacheEntry
+	lru             *list.List
+	openReaders     int
 	capacityChanged chan struct{}
 }
 
@@ -70,6 +102,7 @@ type Reservation struct {
 	reservedBytes  int64
 	committedBytes int64
 	committed      bool
+	published      bool
 	released       bool
 }
 
@@ -104,13 +137,24 @@ func New(options Options) (*Cache, error) {
 		}
 		return nil, fmt.Errorf("acquire cache lock %q: %w", lockPath, err)
 	}
-	return &Cache{
+	cache := &Cache{
 		root:            filepath.Clean(options.Root),
 		lockFile:        lockFile,
 		maxBytes:        options.MaxBytes,
 		maxEntries:      options.MaxEntries,
+		entries:         make(map[string]*cacheEntry),
+		lru:             list.New(),
 		capacityChanged: make(chan struct{}),
-	}, nil
+	}
+	if err := cache.initialize(); err != nil {
+		closeErr := releaseCacheLock(lockFile)
+		fileCloseErr := lockFile.Close()
+		if closeErr != nil || fileCloseErr != nil {
+			return nil, fmt.Errorf("initialize cache: %w; release lock: %v; close lock: %v", err, closeErr, fileCloseErr)
+		}
+		return nil, err
+	}
+	return cache, nil
 }
 
 func (c *Cache) Close() error {
@@ -122,7 +166,16 @@ func (c *Cache) Close() error {
 		c.mu.Unlock()
 		return nil
 	}
-	if c.reservedBytes != 0 || c.reservedEntries != 0 || c.usedBytes != 0 || c.usedEntries != 0 {
+	c.mu.Unlock()
+	if err := c.FlushRecency(); err != nil {
+		return fmt.Errorf("close cache: %w", err)
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	if c.reservedBytes != 0 || c.reservedEntries != 0 || c.openReaders != 0 {
 		stats := Stats{
 			UsedBytes:       c.usedBytes,
 			ReservedBytes:   c.reservedBytes,
@@ -130,7 +183,7 @@ func (c *Cache) Close() error {
 			ReservedEntries: c.reservedEntries,
 		}
 		c.mu.Unlock()
-		return fmt.Errorf("close cache: active accounting remains: %+v", stats)
+		return fmt.Errorf("close cache: active reservations/readers remain: stats=%+v readers=%d", stats, c.openReaders)
 	}
 	c.closed = true
 	close(c.capacityChanged)
@@ -257,7 +310,7 @@ func (reservation *Reservation) Commit(actualBytes int64) error {
 	c := reservation.cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if reservation.released || reservation.committed || c.closed {
+	if reservation.released || reservation.committed || reservation.published || c.closed {
 		return fmt.Errorf("commit cache reservation: %w", ErrInvalidReservation)
 	}
 	c.reservedBytes -= reservation.reservedBytes
@@ -276,7 +329,7 @@ func (reservation *Reservation) Release() error {
 	c := reservation.cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if reservation.released {
+	if reservation.released || reservation.published {
 		return nil
 	}
 	if reservation.committed {

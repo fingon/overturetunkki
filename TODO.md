@@ -3,8 +3,8 @@
 The repository contains the design and the completed native dependency build,
 H3 filtering, bounded worker query/output validation, GeoParquet writer
 compatibility, typed command configuration, CI build gates, catalog validation,
-catalog observation, and cache ownership/admission primitives. Remaining items
-below are pending;
+catalog observation, and cache ownership/admission and persistence primitives.
+Remaining items below are pending;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -67,7 +67,7 @@ below are pending;
 
 - [x] Implement exclusive ownership, hashed paths, byte/entry reservations,
   bounded worker queue, same-key coalescing, caller detachment, and job cleanup.
-- [ ] Implement LRU eviction, open-reader pins, obsolete-generation priority,
+- [x] Implement LRU eviction, open-reader pins, obsolete-generation priority,
   atomic file/sidecar publication, batched recency persistence, and startup
   reconciliation. Keep deleted/open files and failed cleanup accounted.
 - [ ] Implement bounded scratch with deployment quotas and separate bounded

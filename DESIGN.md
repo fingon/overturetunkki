@@ -370,8 +370,10 @@ constant S3 transfer.
 and staging paths from a SHA-256 cache key, and accounts byte/entry reservations
 under one mutex. Its keyed scheduler bounds the worker queue, coalesces callers
 for one key, detaches canceled callers, cancels abandoned jobs, and releases
-reservations after build cleanup. LRU publication, persistent sidecars, and
-restart reconciliation remain below.
+reservations after build cleanup. It publishes a file and sidecar atomically,
+maintains a doubly linked LRU with reader pins and obsolete-generation priority,
+batches recency writes, and reconciles corrupt/orphan state at startup. Quota
+reservation and negative-cache policy remain separate.
 
 Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.
 The size policy hashes byte/row limits, preventing reuse of outdated rejection
