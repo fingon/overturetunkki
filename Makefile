@@ -21,14 +21,17 @@ SERVICE_IMAGE_REPO ?= overturetunkki/service
 SERVICE_IMAGE_TAG ?= dev
 SERVICE_IMAGE_REF := $(SERVICE_IMAGE_REPO):$(SERVICE_IMAGE_TAG)
 
-.PHONY: test-linux test-darwin image-linux service-image-linux all lint test test-client build build-client build-native build-linux fetch-extensions image service-image container-test smoke hooks clean
+.PHONY: test-linux test-darwin test-tools image-linux service-image-linux all lint test test-client build build-client build-native build-linux fetch-extensions image service-image container-test smoke hooks clean
 
 all: test
 
 lint:
 	$(PREK) run --all-files
 
-test: test-$(HOST_OS)
+test: test-$(HOST_OS) test-tools
+
+test-tools:
+	cd build/tools && $(GO) test ./...
 
 test-linux:
 	$(GO) test ./...
@@ -72,7 +75,8 @@ image-linux: fetch-extensions
 
 service-image-linux: fetch-extensions
 	mkdir -p $(BIN_DIR)
-	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --platform linux/$(TARGET_ARCH) --push=false --bare --tags $(SERVICE_IMAGE_TAG) --tarball $(BIN_DIR)/service.tar ./cmd/overturetunkki
+	KO_DOCKER_REPO=$(SERVICE_IMAGE_REPO) $(KO) build --platform linux/$(TARGET_ARCH) --push=false --bare --tags $(SERVICE_IMAGE_TAG) --tarball $(BIN_DIR)/service-ko.tar ./cmd/overturetunkki
+	cd build/tools && $(GO) run ./cache-image --input $(abspath $(BIN_DIR))/service-ko.tar --output $(abspath $(BIN_DIR))/service.tar --tag $(SERVICE_IMAGE_REF)
 
 container-test: service-image build-client
 	mkdir -p $(BIN_DIR)/container-tmp

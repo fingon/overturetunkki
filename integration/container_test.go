@@ -93,6 +93,16 @@ func TestContainerLifecycle(t *testing.T) {
 	}
 
 	fixture := newFixtureServer(t)
+	t.Run("default cache without a mount", func(t *testing.T) {
+		container := newServiceContainer(t, image, fixture, "")
+		t.Cleanup(container.remove)
+		container.start()
+		client := &http.Client{Timeout: 3 * time.Second}
+		waitForReady(t, client, container.url("/readyz"))
+		catalog := fetchCatalog(t, client, container.url("/v1/catalog"))
+		body, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: catalog.CatalogVersion, cell: testCell(t, 9), wantStatus: http.StatusOK})
+		validateTile(t, body)
+	})
 	cacheDirectory := t.TempDir()
 	if err := os.Chmod(cacheDirectory, 0o777); err != nil {
 		t.Fatalf("make cache directory writable: %v", err)
@@ -304,17 +314,14 @@ func (container *serviceContainer) start() {
 	container.t.Helper()
 	args := []string{
 		"run", "--detach", "--name", container.name,
-		"--read-only",
 		"--user", "65532:65532",
 		"--security-opt", "no-new-privileges",
 		"--cap-drop", "ALL",
 		"--userns", "keep-id:uid=65532,gid=65532",
 		"--publish", fmt.Sprintf("127.0.0.1::%d", containerListenPort),
-		"--mount", "type=bind,src=" + container.cacheDirectory + ",dst=/var/cache/overture",
 		"--mount", "type=bind,src=" + container.certPath + ",dst=/etc/ssl/certs/ca-certificates.crt,readonly",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
 		"--env", "OVERTURE_LISTEN=:8080",
-		"--env", "OVERTURE_CACHE_DIR=/var/cache/overture",
 		"--env", "OVERTURE_CATALOG_URL=" + container.fixture.baseURL + "/catalog.json",
 		"--env", "OVERTURE_CATALOG_HOST=" + hostPort(container.fixture.baseURL),
 		"--env", "OVERTURE_ASSET_HOST=" + hostPort(container.fixture.baseURL),
@@ -334,8 +341,11 @@ func (container *serviceContainer) start() {
 		"--env", "OVERTURE_NEGATIVE_CACHE_ENTRIES=8",
 		"--env", "OVERTURE_NEGATIVE_CACHE_TTL=1m",
 		"--env", "OVERTURE_WRITE_TIMEOUT=5s",
-		container.image,
 	}
+	if container.cacheDirectory != "" {
+		args = append(args, "--read-only", "--mount", "type=bind,src="+container.cacheDirectory+",dst=/var/cache/overture")
+	}
+	args = append(args, container.image)
 	if output, err := commandOutput(containerCommand, args...); err != nil {
 		container.t.Fatalf("start service container: %v\n%s", err, output)
 	}

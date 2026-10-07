@@ -36,6 +36,11 @@ DuckDB; invalid coordinates and cells are not silently discarded.
 ## Architecture
 
 One container owns one writable cache directory and an exclusive process lock.
+The service image includes an empty `/var/cache/overture` directory owned by
+UID/GID 65532 with mode 0750, added as a deterministic layer after the ko build.
+It supports running without a cache mount on a writable root filesystem;
+the cache then lasts only as long as the container. Read-only root filesystems
+require a writable cache mount.
 The Go supervisor handles HTTP, catalog discovery, cache accounting, and work
 admission. A bounded scheduler launches one isolated worker process per admitted
 build from the same binary and embeds DuckDB through
@@ -519,7 +524,8 @@ branch build native amd64 and arm64 service images and publish their manifest
 as `ghcr.io/fingon/overturetunkki/service:latest`. `image` and `smoke`
 exercise the bundled native dependency probe. `service-image` packages the same bundled
 extensions with the HTTP service. `container-test` is opt-in and runs a local
-TLS STAC/asset fixture against the service image with a read-only root,
+TLS STAC/asset fixture against the service image, first verifying readiness and
+tile generation with the default cache and no cache mount, then with a read-only root,
 writable bounded cache volume, concurrent requests, conditional responses,
 release rollover, catalog and asset outages, worker replacement, and restart.
 The pre-commit hook is installed with `make hooks`.

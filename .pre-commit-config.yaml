@@ -20,3 +20,6 @@ repos:
     hooks:
       - id: golangci-lint-config-verify
       - id: golangci-lint-full
+      - id: golangci-lint-full
+        name: golangci-lint build tools
+        entry: bash -c 'cd build/tools && golangci-lint run --fix --config ../../.golangci.yaml'

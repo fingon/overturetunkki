@@ -161,9 +161,14 @@ unavailable, so omit the tile or use a deployment with different limits.
 
 `make image` and `make smoke` build and run the native probe with bundled
 DuckDB `httpfs` and `spatial` extensions. `make service-image` builds the
-HTTP service image. `make container-test` first builds the CLI and service
+HTTP service image with an empty `/var/cache/overture` directory owned by the
+service user (UID/GID 65532). With a writable root filesystem, it runs without
+a cache mount; that cache lasts only as long as the container. Read-only
+deployments still need a writable cache mount, as shown below.
+`make container-test` first builds the CLI and service
 image, then runs an opt-in Podman lifecycle test using deterministic local
-STAC and GeoParquet fixtures; it uses a read-only root, a writable bounded
+STAC and GeoParquet fixtures; it checks the default cache without a mount,
+then uses a read-only root, a writable bounded
 cache volume, an independent GeoParquet reader, CLI download/304/stale-version
 checks, rollover, outages, worker replacement, and restart. It does not
 contact live S3. Live upstream tests, if added, must remain separately opt-in.
