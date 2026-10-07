@@ -191,8 +191,8 @@ podman run --rm -p 8080:8080 --read-only --cap-drop=ALL \
 
 `make build-linux` builds Linux binaries through the same Podman toolchain.
 Builds default to the host architecture; another `TARGET_ARCH` requires
-Podman emulation support. GitHub Actions checks Linux amd64/arm64 and macOS
-Intel/Apple Silicon clients, and runs Linux image smoke and lifecycle tests.
+Podman emulation support. GitHub Actions checks Linux amd64/arm64 and runs
+Linux image smoke and lifecycle tests.
 The service remains Linux-only; native macOS service builds are unsupported.
 
 Successful pushes to `main` publish the service as a multi-platform image at

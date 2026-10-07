@@ -518,7 +518,7 @@ container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
 `build/tools/go.mod`, isolated from application dependencies; Podman runs it
 in Linux and loads its image tarballs. No Docker daemon is required.
 On macOS, build/test/vet select the CGO H3 client; the service remains Linux-only.
-GitHub Actions tests both host architectures on Linux and macOS and gates
+GitHub Actions tests amd64 and arm64 on Linux and gates
 Linux images with smoke and lifecycle tests. Successful pushes to the default
 branch build native amd64 and arm64 service images and publish their manifest
 as `ghcr.io/fingon/overturetunkki/service:latest`. `image` and `smoke`
