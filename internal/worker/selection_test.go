@@ -168,10 +168,12 @@ func TestCandidateBranchUnionAppliesOneGlobalRowLimit(t *testing.T) {
 		SELECT i::VARCHAR AS id, struct_pack(latitude := ?, longitude := ?) AS geometry,
 		CASE i
 		WHEN 0 THEN struct_pack(xmin := ?, xmax := ?, ymin := ?, ymax := ?)
-		WHEN 1 THEN NULL
+		WHEN 1 THEN struct_pack(xmin := ?, xmax := ?, ymin := ?, ymax := ?)
+		WHEN 2 THEN struct_pack(xmin := ?, xmax := ?, ymin := ?, ymax := ?)
+		WHEN 3 THEN NULL
 		ELSE struct_pack(xmin := 200.0, xmax := 201.0, ymin := 0.0, ymax := 1.0)
-		END AS bbox FROM range(3) AS source(i)
-	`, center.Lat, center.Lng, center.Lng, center.Lng, center.Lat, center.Lat)
+		END AS bbox FROM range(5) AS source(i)
+	`, center.Lat, center.Lng, center.Lng, center.Lng, center.Lat, center.Lat, center.Lng, center.Lng, center.Lat, center.Lat, 20.0, -20.0, center.Lat, center.Lat)
 	assert.NilError(t, err)
 	_, err = connection.ExecContext(t.Context(), "COPY source_rows TO ? (FORMAT PARQUET)", filePath)
 	assert.NilError(t, err)

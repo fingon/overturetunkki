@@ -19,16 +19,17 @@ import (
 )
 
 const (
-	DefaultCatalogURL                  = "https://stac.overturemaps.org/catalog.json"
-	DefaultCatalogHost                 = "stac.overturemaps.org"
-	DefaultAssetHost                   = "overturemaps-us-west-2.s3.us-west-2.amazonaws.com"
-	DefaultAssetProvider               = "aws"
-	DefaultStorageRegion               = "us-west-2"
-	DefaultAssetType                   = "application/vnd.apache.parquet"
-	DefaultCollectionID                = "place"
-	DefaultMaxResponseBytes      int64 = 16 * 1024 * 1024
-	DefaultProjectionH3Semantics       = "latlng-to-cell-v1"
-	DefaultProjectionWriter            = "geoparquet-1.1-wkb-zstd-v1"
+	DefaultCatalogURL                    = "https://stac.overturemaps.org/catalog.json"
+	DefaultCatalogHost                   = "stac.overturemaps.org"
+	DefaultAssetHost                     = "overturemaps-us-west-2.s3.us-west-2.amazonaws.com"
+	DefaultAssetProvider                 = "aws"
+	DefaultStorageRegion                 = "us-west-2"
+	DefaultAssetType                     = "application/vnd.apache.parquet"
+	DefaultCollectionID                  = "place"
+	DefaultMaxResponseBytes        int64 = 16 * 1024 * 1024
+	DefaultProjectionH3Semantics         = "latlng-to-cell-v1"
+	DefaultProjectionBBoxSemantics       = "valid-bbox-only-v1"
+	DefaultProjectionWriter              = "geoparquet-1.1-wkb-zstd-v1"
 
 	stacCatalogType       = "Catalog"
 	stacCollectionType    = "Collection"
@@ -820,6 +821,7 @@ func projectionID(fields []string, schema Schema) (string, error) {
 	input := map[string]any{
 		"fields":           fields,
 		"h3_semantics":     DefaultProjectionH3Semantics,
+		"bbox_semantics":   DefaultProjectionBBoxSemantics,
 		"resolved_columns": selectedColumns,
 		"writer_format":    DefaultProjectionWriter,
 	}

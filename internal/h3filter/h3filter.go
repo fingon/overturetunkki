@@ -19,11 +19,9 @@ const (
 	minLongitudeDeg          = -180.0
 	maxLongitudeDeg          = 180.0
 	angularMarginRad         = 1e-12
-	unprunedPredicateSQL     = "TRUE"
 	bboxLatitudeValidSQL     = "bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax"
 	bboxLongitudeValidSQL    = "bbox.xmin IS NOT NULL AND bbox.xmax IS NOT NULL AND bbox.xmin >= -180 AND bbox.xmin <= 180 AND bbox.xmax >= -180 AND bbox.xmax <= 180"
-	bboxLatitudeInvalidSQL   = "bbox.ymin IS NULL OR bbox.ymax IS NULL OR bbox.ymin < -90 OR bbox.ymin > 90 OR bbox.ymax < -90 OR bbox.ymax > 90 OR bbox.ymin > bbox.ymax"
-	bboxLongitudeInvalidSQL  = "bbox.xmin IS NULL OR bbox.xmax IS NULL OR bbox.xmin < -180 OR bbox.xmin > 180 OR bbox.xmax < -180 OR bbox.xmax > 180"
+	bboxValidSQL             = "(" + bboxLatitudeValidSQL + ") AND (" + bboxLongitudeValidSQL + ")"
 )
 
 type LongitudeInterval struct {
@@ -224,32 +222,19 @@ func (bounds Bounds) IsGlobal() bool {
 }
 
 func (bounds Bounds) DuckDBBBoxPredicate() (string, []any) {
-	if bounds.IsGlobal() || len(bounds.LongitudeIntervals) == 0 {
-		return unprunedPredicateSQL, nil
+	branches := bounds.DuckDBBBoxBranches()
+	predicates := make([]string, 0, len(branches))
+	var args []any
+	for _, branch := range branches {
+		predicates = append(predicates, "("+branch.Predicate+")")
+		args = append(args, branch.Args...)
 	}
-
-	longitudePredicates := make([]string, 0, len(bounds.LongitudeIntervals))
-	args := make([]any, 0, 2+len(bounds.LongitudeIntervals)*4)
-	args = append(args, bounds.LatitudeMinDeg, bounds.LatitudeMaxDeg)
-	for range bounds.LongitudeIntervals {
-		longitudePredicates = append(longitudePredicates,
-			"((bbox.xmin <= bbox.xmax AND bbox.xmax >= ? AND bbox.xmin <= ?) OR "+
-				"(bbox.xmin > bbox.xmax AND (bbox.xmin <= ? OR bbox.xmax >= ?)))")
-	}
-	for _, interval := range bounds.LongitudeIntervals {
-		args = append(args, interval.MinDeg, interval.MaxDeg, interval.MaxDeg, interval.MinDeg)
-	}
-
-	return "(bbox.xmin IS NULL OR bbox.xmax IS NULL OR bbox.ymin IS NULL OR bbox.ymax IS NULL OR " +
-		"bbox.ymin > bbox.ymax OR bbox.xmin < -180 OR bbox.xmin > 180 OR " +
-		"bbox.xmax < -180 OR bbox.xmax > 180 OR bbox.ymin < -90 OR " +
-		"bbox.ymin > 90 OR bbox.ymax < -90 OR bbox.ymax > 90 OR " +
-		"(bbox.ymax >= ? AND bbox.ymin <= ? AND (" + joinPredicates(longitudePredicates) + "))) ", args
+	return "(" + joinPredicates(predicates) + ")", args
 }
 
 func (bounds Bounds) DuckDBBBoxBranches() []BBoxQueryBranch {
 	if bounds.IsGlobal() || len(bounds.LongitudeIntervals) == 0 {
-		return []BBoxQueryBranch{{Predicate: unprunedPredicateSQL}}
+		return []BBoxQueryBranch{{Predicate: bboxValidSQL}}
 	}
 	ordinaryLongitude := make([]string, 0, len(bounds.LongitudeIntervals))
 	wrappedLongitude := make([]string, 0, len(bounds.LongitudeIntervals))
@@ -261,19 +246,16 @@ func (bounds Bounds) DuckDBBBoxBranches() []BBoxQueryBranch {
 		ordinaryArgs = append(ordinaryArgs, interval.MinDeg, interval.MaxDeg)
 		wrappedArgs = append(wrappedArgs, interval.MaxDeg, interval.MinDeg)
 	}
-	validBBoxSQL := "(" + bboxLatitudeValidSQL + ") AND (" + bboxLongitudeValidSQL + ")"
 	latitudeOverlapSQL := "bbox.ymax >= ? AND bbox.ymin <= ?"
 	return []BBoxQueryBranch{
 		{
-			Predicate: validBBoxSQL + " AND bbox.xmin <= bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(ordinaryLongitude) + ")",
+			Predicate: bboxValidSQL + " AND bbox.xmin <= bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(ordinaryLongitude) + ")",
 			Args:      ordinaryArgs,
 		},
 		{
-			Predicate: validBBoxSQL + " AND bbox.xmin > bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(wrappedLongitude) + ")",
+			Predicate: bboxValidSQL + " AND bbox.xmin > bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(wrappedLongitude) + ")",
 			Args:      wrappedArgs,
 		},
-		{Predicate: "(" + bboxLatitudeInvalidSQL + ")"},
-		{Predicate: "(" + bboxLatitudeValidSQL + ") AND (" + bboxLongitudeInvalidSQL + ")"},
 	}
 }
 

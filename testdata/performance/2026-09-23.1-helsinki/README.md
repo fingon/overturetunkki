@@ -89,9 +89,9 @@ The output has the same 58 IDs, byte count, and SHA-256 digest as the baseline;
 an independent reader confirmed H3 membership again. A repeated cache hit
 took 280 ms and returned identical bytes.
 
-## Final branch measurement
+## Historical final fallback measurement
 
-The final implementation uses explicit invalid-bound checks instead of negated
+The previous implementation used explicit invalid-bound checks instead of negated
 validity checks. Its [executed profile](optimized-profile.txt) records:
 
 | Measurement | Final cold request |
@@ -124,5 +124,39 @@ malformed rows and still read widely. The observed client latency is about
 24% lower and GET count about 25% lower than the baseline, but transferred
 bytes increase from 70.6 to 95.1 MiB. These single-run measurements depend on
 network conditions and do not establish a latency guarantee or constant-time
-rejection. The service satisfies the chosen-fields contract; expensive fallback
-reads are still a cold-tile limitation.
+rejection. These historical requests satisfied the chosen-fields contract, but expensive
+fallback reads remained a cold-tile limitation. The current implementation
+excludes malformed bboxes and removes both fallback branches. Its equivalence
+tests compare against exact H3 membership over valid bboxes, and its global
+row-limit test spans the ordinary and wrapped branches. The projection identity
+changes to prevent reuse of tiles generated under the previous eligibility rule.
+
+
+## Valid-bbox subset measurement
+
+The current implementation removes both malformed-bbox fallback branches.
+Its projection ID is
+`sha256:24394f90eaf4de784e9b4947747f01940e7c85e84279b0766a3a2dca82abc04d`.
+A fresh container with the settings above produced this
+[executed profile](valid-bbox-profile.txt):
+
+| Measurement | Cold request |
+| --- | ---: |
+| Client elapsed | 10927 ms |
+| Worker elapsed | 10636 ms |
+| Candidate query/materialization | 10539 ms |
+| COPY | 1 ms |
+| Output validation | 1 ms |
+| HTTP HEADs | 1 |
+| HTTP GETs | 24 |
+| HTTP bytes received | 6.8 MiB |
+| Validated output | 58 rows, 5859 bytes |
+| Repeated cache hit | 313 ms |
+
+The ordinary and wrapped scan operators took 3.00 and 4.61 seconds. The file
+hash matches the historical baseline, and an independent PyArrow/Shapely/H3
+reader verified the four selected columns, all 58 recorded IDs, and exact cell
+membership. The repeated hit returned identical bytes. This is a single-run
+comparison, not a latency guarantee: the request took about 94% less time and
+received about 93% fewer bytes than the historical final fallback request.
+Rows with missing or malformed bboxes are excluded by the new tile contract.

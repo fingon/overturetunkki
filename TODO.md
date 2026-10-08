@@ -135,8 +135,10 @@ items below are completed;
   timings, validated output IDs, and a repeated cache hit. The recorded
   [live measurements](testdata/performance/2026-09-23.1-helsinki/README.md)
   confirm projection pushdown and successful completion within 300 seconds.
-  Disjoint bbox branches preserve unpruned H3 results for null/invalid/wrapped
-  bboxes and one global row limit. The final run took 185 seconds, 775 GETs,
+  Disjoint bbox branches preserve exact H3 membership over valid bboxes and
+  one global row limit; null/malformed bboxes are now excluded. The historical
+  fallback run took 185 seconds, 775 GETs,
   and 95.1 MiB; its 58 IDs and digest match the 244-second baseline, and its
-  cache hit took 273 ms. Fallback scans remain expensive; the measured latency
-  improvement trades off increased transfer and does not promise fast cold tiles.
+  cache hit took 273 ms. Removing fallback scans reduced the fresh request to
+  10.9 seconds, 24 GETs, and 6.8 MiB with identical output. Current tiles cover
+  only the valid-bbox subset, with new projection identity.

@@ -279,13 +279,17 @@ a spherical-cap envelope around the H3 center, expanded by the greatest
 center-to-vertex distance, one greatest boundary-edge distance, and a floating-
 point margin. Pentagon cells, cells spanning multiple icosahedron faces, and
 pole-crossing caps use a global longitude range or a global envelope. The
-generated DuckDB predicate also keeps NULL and malformed source bboxes as
-candidates.
+generated DuckDB predicate excludes NULL, non-finite, out-of-range, and
+reversed-latitude source bboxes. Tiles cover only the valid-bbox subset.
+Wrapped longitudes remain supported. There is no full-source fallback scan
+for malformed bboxes.
 
 The table-driven integration test compares selected IDs from pruned and
 unpruned DuckDB queries over 50,000 deterministic point bboxes plus centers and
 boundary vertices for ordinary, pentagon, polar, and antimeridian cells. It
-also covers wrapped and NULL bboxes. Run the performance comparison with:
+also covers wrapped bboxes and verifies NULL/malformed bbox exclusion.
+The unpruned reference is restricted to valid bboxes. Run the performance
+comparison with:
 
 ```text
 go test ./internal/h3filter -run '^$' -bench BenchmarkCellMembershipPruning -benchtime=1x
@@ -315,7 +319,7 @@ provides validated S3 asset lists and generated output paths. Clients cannot
 supply SQL, S3 URLs, column lists, or filesystem paths. Retain source nulls and
 types. Invalid/null/non-point geometries are an upstream data error, not silently
 skipped records. The projection ID hashes ordered columns, resolved types,
-geometry encoding, H3 semantics version, and writer-format revision.
+geometry encoding, H3 and bbox eligibility semantics, and writer-format revision.
 
 ## DuckDB query and bounded output
 
@@ -323,12 +327,12 @@ Validate the complete pinned manifest, then select only places assets whose
 catalog bboxes intersect the conservative H3 cell bounds. Selection retains
 boundary-touching and antimeridian intersections, and all assets for global
 bounds. Read the selected assets through DuckDB `httpfs`; retain projection
-and row-level bbox predicate pushdown. Split ordinary, wrapped-longitude,
-invalid-latitude, and invalid-longitude bboxes into disjoint `UNION ALL`
-branches. This keeps ordinary overlap comparisons available to Parquet row-group
-pruning while retaining malformed/null bboxes for exact H3 evaluation. Invalid
-latitude takes precedence over invalid longitude, so a row with both cannot be
-returned twice. Apply one outer row limit across all branches.
+and row-level bbox predicate pushdown. Split ordinary and wrapped-longitude
+valid bboxes into disjoint `UNION ALL` branches. This exposes ordinary overlap
+comparisons to Parquet row-group pruning without reading all source rows to
+find malformed bboxes. Apply one outer row limit across both branches. Bbox
+eligibility is included in projection identity so tiles built with older
+fallback semantics cannot be served from cache under the new contract.
 Convert geometry to the pinned DuckDB geometry type and
 apply exact H3 membership. Materialize at most `max_tile_rows + 1` matching rows
 in bounded worker scratch. `internal/worker` now builds this statement only
@@ -406,7 +410,8 @@ not replace it with an unbounded COPY followed only by stat.
 
 Deterministic worker benchmarks cover dense-city and sparse-region query
 planning without contacting S3. Bbox correctness tests read Parquet fixtures
-and compare against unpruned exact membership, including null/invalid bboxes.
+and compare against unpruned exact membership over valid bboxes, while
+explicitly checking null/invalid bbox exclusion.
 The HTTPS container fixture serves distinct partitions with range requests,
 records asset requests/transfer bytes, and compares pruned output IDs against
 an unpruned catalog. Verbose mode profiles the candidate materialization with
@@ -414,8 +419,10 @@ an unpruned catalog. Verbose mode profiles the candidate materialization with
 projections, HTTPFS request/transfer statistics, and operator timings. The
 [live Helsinki measurements](testdata/performance/2026-09-23.1-helsinki/README.md)
 confirm selected-field projection and successful 300-second-deadline completion.
-The disjoint branches reduce measured latency and GET count while increasing
-transfer; malformed-bbox fallback scans remain a cold-tile limitation.
+Historical fallback scans dominated the measured latency. The current service
+excludes malformed bboxes and scans only valid overlapping bboxes. A fresh
+Helsinki request took 10.9 seconds and received 6.8 MiB in 24 GETs, returning
+identical output to the historical 185-second fallback request.
 Any live upstream benchmark must report the
 manifest asset bytes, rows examined, S3 transfer, query latency, COPY latency,
 and whether rejection was caused by rows or compressed bytes. Neither the

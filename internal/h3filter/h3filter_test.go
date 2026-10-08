@@ -329,7 +329,7 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 			if index == 0 {
 				assertParquetPredicatePushdown(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 			}
-			unpruned := queryIDs(t, membershipQuery{connection: connection, predicate: "TRUE", cell: cell})
+			unpruned := queryIDs(t, membershipQuery{connection: connection, predicate: bboxValidSQL, cell: cell})
 			pruned := queryIDs(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 			assert.DeepEqual(t, pruned, unpruned)
 			branched := make([]int64, 0)
@@ -350,7 +350,7 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 	assert.Assert(t, sawPruning)
 }
 
-func TestBBoxBranchesKeepInvalidAndNullBoundsWithoutDuplicates(t *testing.T) {
+func TestBBoxBranchesExcludeInvalidAndNullBounds(t *testing.T) {
 	connection := openDuckDBConnection(t)
 	cell := mustCell(t, 60.168, 24.943, 10)
 	center := mustCellCenter(t, cell)
@@ -393,7 +393,12 @@ func TestBBoxBranchesKeepInvalidAndNullBoundsWithoutDuplicates(t *testing.T) {
 			for _, branch := range bounds.DuckDBBBoxBranches() {
 				branched = append(branched, queryIDs(t, membershipQuery{connection: connection, predicate: branch.Predicate, predicateArgs: branch.Args, cell: cell})...)
 			}
-			assert.DeepEqual(t, branched, queryIDs(t, membershipQuery{connection: connection, predicate: "TRUE", cell: cell}))
+			assert.DeepEqual(t, branched, queryIDs(t, membershipQuery{connection: connection, predicate: bboxValidSQL, cell: cell}))
+			if index < 2 {
+				assert.DeepEqual(t, branched, []int64{int64(index)})
+			} else {
+				assert.Equal(t, len(branched), 0)
+			}
 		})
 	}
 }

@@ -4,8 +4,9 @@ This repository builds a Go 1.27 service that serves bounded, zstd-compressed
 GeoParquet POI tiles by H3 cell. The service discovers Overture's STAC catalog,
 pins each request to a catalog version, queries the places assets through
 DuckDB, selects source partitions by conservative spatial bounds, and keeps
-successful tiles in a bounded disk cache. The HTTP API also
-reports request IDs, freshness changes, finer-cell guidance, and retryable
+successful tiles in a bounded disk cache. Tiles cover places with valid source
+bboxes and exclude missing or malformed bboxes. The HTTP API reports request
+IDs, freshness changes, finer-cell guidance, and retryable
 capacity or upstream failures.
 
 The repository includes `overture-client`, a small Go testing client that uses
@@ -208,9 +209,8 @@ HTTP request/transfer statistics. For timeout diagnosis, set
 a longer deadline so it can receive the server's response. Increasing deadlines
 alone does not fix slow remote reads.
 The [recorded Helsinki run](testdata/performance/2026-09-23.1-helsinki/README.md)
-completed in 185 seconds with the selected fields; cold tiles can remain slow
-because conservative malformed-bbox checks read widely. Its repeated cache
-hit took 273 ms.
+records how malformed-bbox fallback scans dominated remote reads. The service
+now excludes those rows and reads only the valid overlapping bbox subset.
 
 Install repository hooks with `make hooks`. See [DESIGN.md](DESIGN.md) for the
 architecture and HTTP contract, and [TODO.md](TODO.md) for the completed
