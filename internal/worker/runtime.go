@@ -25,6 +25,7 @@ var (
 )
 
 type RuntimeSettings struct {
+	Profile          bool
 	MemoryBytes      int64
 	Threads          int64
 	ScratchDirectory string
@@ -40,12 +41,13 @@ type TileResult struct {
 }
 
 type RuntimeTileRequest struct {
-	Conn       *sql.Conn
-	Plan       QueryPlan
-	Snapshot   catalog.Snapshot
-	MaxRows    int64
-	OutputPath string
-	Settings   RuntimeSettings
+	Conn        *sql.Conn
+	Plan        QueryPlan
+	Snapshot    catalog.Snapshot
+	MaxRows     int64
+	OutputPath  string
+	Settings    RuntimeSettings
+	Diagnostics *TileDiagnostics
 }
 
 func (settings RuntimeSettings) Validate() error {
@@ -117,13 +119,17 @@ func BuildTileWithSettings(ctx context.Context, request RuntimeTileRequest) (Til
 	if err := ApplyRuntimeSettings(tileContext, request.Conn, request.Settings); err != nil {
 		return TileResult{}, classifyWorkerError(err)
 	}
+	if request.Diagnostics != nil {
+		request.Diagnostics.ProfileEnabled = request.Settings.Profile
+	}
 	copyResult, err := BuildTile(tileContext, TileBuildRequest{
-		Conn:       request.Conn,
-		Plan:       request.Plan,
-		Snapshot:   request.Snapshot,
-		MaxRows:    request.MaxRows,
-		OutputPath: request.OutputPath,
-		MaxBytes:   request.Settings.MaxOutputBytes,
+		Conn:        request.Conn,
+		Plan:        request.Plan,
+		Snapshot:    request.Snapshot,
+		MaxRows:     request.MaxRows,
+		OutputPath:  request.OutputPath,
+		MaxBytes:    request.Settings.MaxOutputBytes,
+		Diagnostics: request.Diagnostics,
 	})
 	if err != nil {
 		return TileResult{}, classifyWorkerError(err)
@@ -132,13 +138,18 @@ func BuildTileWithSettings(ctx context.Context, request RuntimeTileRequest) (Til
 	for _, column := range request.Plan.Columns {
 		expectedFields = append(expectedFields, column.Name)
 	}
+	finishValidation := request.Diagnostics.start(tileStageValidation)
 	validation, err := geoparquet.ValidateFile(request.OutputPath, expectedFields, request.Settings.MaxOutputBytes)
+	finishValidation()
 	if err != nil {
 		return TileResult{}, cleanupInvalidOutput(request.OutputPath, classifyValidationError(err))
 	}
 	if validation.SizeBytes != copyResult.SizeBytes {
 		cause := fmt.Errorf("%w: COPY reported %d bytes, validator found %d", ErrInvalidOutput, copyResult.SizeBytes, validation.SizeBytes)
 		return TileResult{}, cleanupInvalidOutput(request.OutputPath, cause)
+	}
+	if request.Diagnostics != nil {
+		request.Diagnostics.Stage = tileStageComplete
 	}
 	return TileResult{
 		SizeBytes: validation.SizeBytes,

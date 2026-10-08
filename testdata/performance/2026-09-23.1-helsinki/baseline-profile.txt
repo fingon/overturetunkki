@@ -1,0 +1,130 @@
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE CREATE TEMPORARY TABLE "__overture_candidates" AS SELECT "id", ST_AsWKB("geometry") AS "geometry", "names", "basic_category" FROM read_parquet([?]) WHERE (bbox.xmin IS NULL OR bbox.xmax IS NULL OR bbox.ymin IS NULL OR bbox.ymax IS NULL OR bbox.ymin > bbox.ymax OR bbox.xmin < -180 OR bbox.xmin > 180 OR bbox.xmax < -180 OR bbox.xmax > 180 OR bbox.ymin < -90 OR bbox.ymin > 90 OR bbox.ymax < -90 OR bbox.ymax > 90 OR (bbox.ymax >= ? AND bbox.ymin <= ? AND (((bbox.xmin <= bbox.xmax AND bbox.xmax >= ? AND bbox.xmin <= ?) OR (bbox.xmin > bbox.xmax AND (bbox.xmin <= ? OR bbox.xmax >= ?))))))  AND h3_cell_contains(CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_Y("geometry") END, CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_X("geometry") END, CAST(? AS UBIGINT)) LIMIT ?
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││            in: 70.6 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││             #GET: 1030            ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 244.48s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│    ────────────────────   │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      STREAMING_LIMIT      │
+│    ────────────────────   │
+│                           │
+│          58 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│          geometry         │
+│           names           │
+│       basic_category      │
+│                           │
+│                           │
+│                           │
+│          58 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        READ_PARQUET       │
+│                           │
+│        Projections:       │
+│          geometry         │
+│             id            │
+│           names           │
+│       basic_category      │
+│                           │
+│          Filters:         │
+│  ((struct_extract(bbox,   │
+│  'ymin') > struct_extract │
+│    (bbox, 'ymax')) OR (   │
+│   (struct_extract(bbox,   │
+│       'ymax') >= 60       │
+│   .16709615926648) AND    │
+│   (struct_extract(bbox,   │
+│       'ymin') <= 60       │
+│  .16968210656955) AND ((  │
+│   (struct_extract(bbox,   │
+│ 'xmin') <= struct_extract │
+│    (bbox, 'xmax')) AND    │
+│   (struct_extract(bbox,   │
+│       'xmax') >= 24       │
+│   .941114834679382) AND   │
+│   (struct_extract(bbox,   │
+│       'xmin') <= 24       │
+│  .946313213535568)) OR (  │
+│   (struct_extract(bbox,   │
+│  'xmin') > struct_extract │
+│   (bbox, 'xmax')) AND (   │
+│   (struct_extract(bbox,   │
+│       'xmin') <= 24       │
+│   .946313213535568) OR    │
+│   (struct_extract(bbox,   │
+│       'xmax') >= 24       │
+│   .941114834679382))))))  │
+│   h3_cell_contains(CASE   │
+│   WHEN (NULL) THEN (CAST( │
+│   'invalid geometry' AS   │
+│   DOUBLE)) ELSE ST_Y(CAST │
+│  (geometry AS GEOMETRY))  │
+│   END, CASE  WHEN (NULL)  │
+│     THEN (CAST('invalid   │
+│    geometry' AS DOUBLE))  │
+│   ELSE ST_X(CAST(geometry │
+│     AS GEOMETRY)) END,    │
+│     621798483770376191)   │
+│                           │
+│    Total Files Read: 1    │
+│                           │
+│        Filename(s):       │
+│  https://overturemaps-us  │
+│    -west-2.s3.us-west-2   │
+│   .amazonaws.com/release  │
+│ /2026-09-23.1/theme=places│
+│   /type=place/part-00011  │
+│  -9aa07e3a-309b-5031-8820 │
+│  -4ec743a80d43-c000.zstd  │
+│          .parquet         │
+│                           │
+│                           │
+│                           │
+│          58 rows          │
+│          242.43s          │
+└───────────────────────────┘

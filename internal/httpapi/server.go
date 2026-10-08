@@ -280,7 +280,7 @@ func (server *Server) finishRequest(writer *trackingResponseWriter, request *htt
 	}
 	if status >= http.StatusBadRequest {
 		logLevel := slog.LevelWarn
-		if status >= http.StatusInternalServerError {
+		if status >= http.StatusInternalServerError && !errors.Is(request.Context().Err(), context.Canceled) {
 			logLevel = slog.LevelError
 		}
 		slog.Log(request.Context(), logLevel, "HTTP request failed", "request_id", requestID, "method", request.Method, "path", request.URL.Path, "status", status)
@@ -396,7 +396,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 			server.capacityRejects.Add(1)
 		}
 		logLevel := slog.LevelError
-		if status < http.StatusInternalServerError {
+		if status < http.StatusInternalServerError || errors.Is(err, context.Canceled) {
 			logLevel = slog.LevelWarn
 		}
 		slog.Log(request.Context(), logLevel, "tile request failed", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "status", status, "error", err)
@@ -575,7 +575,7 @@ func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorR
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "rows", "tile exceeds the row limit")
 	case errors.Is(err, cache.ErrCapacityUnavailable), errors.Is(err, cache.ErrQueueFull), errors.Is(err, worker.ErrOutOfMemory):
 		return http.StatusServiceUnavailable, errorResponse{Code: capacityUnavailableCode, Message: capacityUnavailableMessage, Retryable: true}
-	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, worker.ErrTileCanceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, worker.ErrTileTimeout), errors.Is(err, worker.ErrTileCanceled), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusGatewayTimeout, errorResponse{Code: "tile_timeout", Message: "tile build timed out", Retryable: true}
 	case errors.Is(err, worker.ErrUpstream):
 		return http.StatusServiceUnavailable, errorResponse{Code: "upstream_unavailable", Message: "tile source is unavailable", Retryable: true}

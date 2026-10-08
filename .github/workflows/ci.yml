@@ -23,18 +23,36 @@ jobs:
         shell: bash
         run: |
           source build/versions.env
-          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "prek=$PREK_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "go=$GO_VERSION"
+            echo "prek=$PREK_VERSION"
+            echo "python=$(python3 --version)"
+          } >> "$GITHUB_OUTPUT"
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ steps.versions.outputs.go }}
           cache: true
+          cache-dependency-path: |
+            go.sum
+            build/tools/go.sum
       - name: Install pinned prek
         run: |
           python3 -m venv "$RUNNER_TEMP/prek-venv"
           "$RUNNER_TEMP/prek-venv/bin/pip" install "prek==${{ steps.versions.outputs.prek }}"
           echo "$RUNNER_TEMP/prek-venv/bin" >> "$GITHUB_PATH"
+      - name: Cache prek environments
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/prek
+          key: prek-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.python }}-${{ steps.versions.outputs.prek }}-${{ steps.versions.outputs.go }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Cache golangci-lint results
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-lint-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '.pre-commit-config.yaml', '.golangci.yaml', '**/go.mod', '**/go.sum') }}-${{ hashFiles('**/*.go') }}
+          restore-keys: |
+            golangci-lint-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '.pre-commit-config.yaml', '.golangci.yaml', '**/go.mod', '**/go.sum') }}-
       - name: Run lint
         run: make lint
       - name: Run tests
@@ -54,6 +72,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            build/tools/go.sum
+      - name: Prepare Podman Go cache directory
+        run: |
+          cache_directory="$RUNNER_TEMP/podman-go-cache"
+          mkdir -p "$cache_directory"
+          echo "GO_CACHE_VOLUME=$cache_directory" >> "$GITHUB_ENV"
+      - name: Cache Podman Go dependencies and builds
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.GO_CACHE_VOLUME }}
+          key: podman-go-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '**/go.mod', '**/go.sum') }}-${{ hashFiles('**/*.go', 'Makefile', '.ko.yaml', 'scripts/**', '**/kodata/**') }}
+          restore-keys: |
+            podman-go-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '**/go.mod', '**/go.sum') }}-
       - name: Install Podman
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build Linux binaries
@@ -83,6 +117,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            build/tools/go.sum
+      - name: Prepare Podman Go cache directory
+        run: |
+          cache_directory="$RUNNER_TEMP/podman-go-cache"
+          mkdir -p "$cache_directory"
+          echo "GO_CACHE_VOLUME=$cache_directory" >> "$GITHUB_ENV"
+      - name: Cache Podman Go dependencies and builds
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.GO_CACHE_VOLUME }}
+          key: podman-go-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '**/go.mod', '**/go.sum') }}-${{ hashFiles('**/*.go', 'Makefile', '.ko.yaml', 'scripts/**', '**/kodata/**') }}
+          restore-keys: |
+            podman-go-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/versions.env', '**/go.mod', '**/go.sum') }}-
       - name: Install Podman
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build service image archive

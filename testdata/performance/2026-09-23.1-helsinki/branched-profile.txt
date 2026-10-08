@@ -1,0 +1,138 @@
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE CREATE TEMPORARY TABLE "__overture_candidates" AS SELECT * FROM (SELECT "id", ST_AsWKB("geometry") AS "geometry", "names", "basic_category" FROM read_parquet([?]) WHERE ((bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax) AND (bbox.xmin IS NOT NULL AND bbox.xmax IS NOT NULL AND bbox.xmin >= -180 AND bbox.xmin <= 180 AND bbox.xmax >= -180 AND bbox.xmax <= 180) AND bbox.xmin <= bbox.xmax AND bbox.ymax >= ? AND bbox.ymin <= ? AND ((bbox.xmax >= ? AND bbox.xmin <= ?))) AND h3_cell_contains(CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_Y("geometry") END, CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_X("geometry") END, CAST(? AS UBIGINT)) UNION ALL SELECT "id", ST_AsWKB("geometry") AS "geometry", "names", "basic_category" FROM read_parquet([?]) WHERE ((bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax) AND (bbox.xmin IS NOT NULL AND bbox.xmax IS NOT NULL AND bbox.xmin >= -180 AND bbox.xmin <= 180 AND bbox.xmax >= -180 AND bbox.xmax <= 180) AND bbox.xmin > bbox.xmax AND bbox.ymax >= ? AND bbox.ymin <= ? AND ((bbox.xmin <= ? OR bbox.xmax >= ?))) AND h3_cell_contains(CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_Y("geometry") END, CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_X("geometry") END, CAST(? AS UBIGINT)) UNION ALL SELECT "id", ST_AsWKB("geometry") AS "geometry", "names", "basic_category" FROM read_parquet([?]) WHERE (NOT (bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax)) AND h3_cell_contains(CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_Y("geometry") END, CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_X("geometry") END, CAST(? AS UBIGINT)) UNION ALL SELECT "id", ST_AsWKB("geometry") AS "geometry", "names", "basic_category" FROM read_parquet([?]) WHERE ((bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax) AND NOT (bbox.xmin IS NOT NULL AND bbox.xmax IS NOT NULL AND bbox.xmin >= -180 AND bbox.xmin <= 180 AND bbox.xmax >= -180 AND bbox.xmax <= 180)) AND h3_cell_contains(CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_Y("geometry") END, CASE WHEN "geometry" IS NULL OR ST_GeometryType("geometry") <> 'ST_POINT' THEN CAST('invalid geometry' AS DOUBLE) ELSE ST_X("geometry") END, CAST(? AS UBIGINT))) AS candidates LIMIT ?
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││            in: 95.1 MiB           ││
+││            out: 0 bytes           ││
+││              #HEAD: 1             ││
+││             #GET: 775             ││
+││              #PUT: 0              ││
+││              #POST: 0             ││
+││             #DELETE: 0            ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 223.46s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│    ────────────────────   │
+│                           │
+│           1 row           │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      STREAMING_LIMIT      │
+│    ────────────────────   │
+│                           │
+│          58 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNION           │
+│    ────────────────────   │
+│                           ├──────────────┬────────────────────────────┬────────────────────────────┐
+│          58 rows          │              │                            │                            │
+│           0.00s           │              │                            │                            │
+└─────────────┬─────────────┘              │                            │                            │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         PROJECTION        ││         PROJECTION        ││         PROJECTION        ││         PROJECTION        │
+│    ────────────────────   ││    ────────────────────   ││    ────────────────────   ││    ────────────────────   │
+│             id            ││             id            ││             id            ││             id            │
+│          geometry         ││          geometry         ││          geometry         ││          geometry         │
+│           names           ││           names           ││           names           ││           names           │
+│       basic_category      ││       basic_category      ││       basic_category      ││       basic_category      │
+│                           ││                           ││                           ││                           │
+│                           ││                           ││                           ││                           │
+│                           ││                           ││                           ││                           │
+│          58 rows          ││           0 rows          ││           0 rows          ││           0 rows          │
+│           0.00s           ││           0.00s           ││           0.00s           ││           0.00s           │
+└─────────────┬─────────────┘└─────────────┬─────────────┘└─────────────┬─────────────┘└─────────────┬─────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         TABLE_SCAN        ││         TABLE_SCAN        ││         TABLE_SCAN        │
+│    ────────────────────   ││    ────────────────────   ││    ────────────────────   ││    ────────────────────   │
+│         Function:         ││         Function:         ││         Function:         ││         Function:         │
+│        READ_PARQUET       ││        READ_PARQUET       ││        READ_PARQUET       ││        READ_PARQUET       │
+│                           ││                           ││                           ││                           │
+│        Projections:       ││        Projections:       ││        Projections:       ││        Projections:       │
+│          geometry         ││          geometry         ││          geometry         ││          geometry         │
+│             id            ││             id            ││             id            ││             id            │
+│           names           ││           names           ││           names           ││           names           │
+│       basic_category      ││       basic_category      ││       basic_category      ││       basic_category      │
+│                           ││                           ││                           ││                           │
+│          Filters:         ││          Filters:         ││          Filters:         ││          Filters:         │
+│ bbox.ymin>=-90.0 AND bbox ││ bbox.ymin>=-90.0 AND bbox ││ (NOT (struct_extract(bbox,││ bbox.ymin>=-90.0 AND bbox │
+│  .ymin<=60.16968210656955 ││  .ymin<=60.16968210656955 ││  'ymin') <= struct_extract││      .ymax<=90.0 AND      │
+│      AND bbox.ymax>=60    ││      AND bbox.ymax>=60    ││      (bbox, 'ymax')))     ││   (struct_extract(bbox,   │
+│  .16709615926648 AND bbox ││  .16709615926648 AND bbox ││   h3_cell_contains(CASE   ││ 'ymin') IS NOT NULL) AND  │
+│ .ymax<=90.0 AND bbox.xmin>││ .ymax<=90.0 AND bbox.xmin>││   WHEN (NULL) THEN (CAST( ││   (struct_extract(bbox,   │
+│ =-180.0 AND bbox.xmin<=24 ││ =-180.0 AND bbox.xmin<=180││   'invalid geometry' AS   ││ 'ymax') IS NOT NULL) AND  │
+│ .946313213535568 AND bbox ││  .0 AND bbox.xmax>=-180.0 ││   DOUBLE)) ELSE ST_Y(CAST ││   (struct_extract(bbox,   │
+│ .xmax>=24.941114834679382 ││  AND bbox.xmax<=180.0 AND ││  (geometry AS GEOMETRY))  ││ 'ymin') <= struct_extract │
+│  AND bbox.xmax<=180.0 AND ││   (struct_extract(bbox,   ││   END, CASE  WHEN (NULL)  ││ (bbox, 'ymax')) AND (NOT (│
+│   (struct_extract(bbox,   ││ 'ymin') IS NOT NULL) AND  ││     THEN (CAST('invalid   ││   (struct_extract(bbox,   │
+│ 'ymin') IS NOT NULL) AND  ││   (struct_extract(bbox,   ││    geometry' AS DOUBLE))  ││ 'xmin') IS NOT NULL) AND  │
+│   (struct_extract(bbox,   ││ 'ymax') IS NOT NULL) AND  ││   ELSE ST_X(CAST(geometry ││   (struct_extract(bbox,   │
+│ 'ymax') IS NOT NULL) AND  ││   (struct_extract(bbox,   ││     AS GEOMETRY)) END,    ││ 'xmax') IS NOT NULL) AND  │
+│   (struct_extract(bbox,   ││ 'ymin') <= struct_extract ││     621798483770376191)   ││   (struct_extract(bbox,   │
+│ 'ymin') <= struct_extract ││    (bbox, 'ymax')) AND    ││                           ││  'xmin') >= -180.0) AND   │
+│    (bbox, 'ymax')) AND    ││   (struct_extract(bbox,   ││    Total Files Read: 1    ││   (struct_extract(bbox,   │
+│   (struct_extract(bbox,   ││ 'xmin') IS NOT NULL) AND  ││                           ││   'xmin') <= 180.0) AND   │
+│ 'xmin') IS NOT NULL) AND  ││   (struct_extract(bbox,   ││        Filename(s):       ││   (struct_extract(bbox,   │
+│   (struct_extract(bbox,   ││ 'xmax') IS NOT NULL) AND  ││  https://overturemaps-us  ││  'xmax') >= -180.0) AND   │
+│ 'xmax') IS NOT NULL) AND  ││   (struct_extract(bbox,   ││    -west-2.s3.us-west-2   ││   (struct_extract(bbox,   │
+│   (struct_extract(bbox,   ││  'xmin') > struct_extract ││   .amazonaws.com/release  ││    'xmax') <= 180.0)))    │
+│ 'xmin') <= struct_extract ││   (bbox, 'xmax')) AND (   ││ /2026-09-23.1/theme=places││   h3_cell_contains(CASE   │
+│      (bbox, 'xmax'))      ││   (struct_extract(bbox,   ││   /type=place/part-00011  ││   WHEN (NULL) THEN (CAST( │
+│   h3_cell_contains(CASE   ││       'xmin') <= 24       ││  -9aa07e3a-309b-5031-8820 ││   'invalid geometry' AS   │
+│   WHEN (NULL) THEN (CAST( ││   .946313213535568) OR    ││  -4ec743a80d43-c000.zstd  ││   DOUBLE)) ELSE ST_Y(CAST │
+│   'invalid geometry' AS   ││   (struct_extract(bbox,   ││          .parquet         ││  (geometry AS GEOMETRY))  │
+│   DOUBLE)) ELSE ST_Y(CAST ││       'xmax') >= 24       ││                           ││   END, CASE  WHEN (NULL)  │
+│  (geometry AS GEOMETRY))  ││     .941114834679382))    ││                           ││     THEN (CAST('invalid   │
+│   END, CASE  WHEN (NULL)  ││   h3_cell_contains(CASE   ││                           ││    geometry' AS DOUBLE))  │
+│     THEN (CAST('invalid   ││   WHEN (NULL) THEN (CAST( ││                           ││   ELSE ST_X(CAST(geometry │
+│    geometry' AS DOUBLE))  ││   'invalid geometry' AS   ││          125.73s          ││     AS GEOMETRY)) END,    │
+│   ELSE ST_X(CAST(geometry ││   DOUBLE)) ELSE ST_Y(CAST ││                           ││     621798483770376191)   │
+│     AS GEOMETRY)) END,    ││  (geometry AS GEOMETRY))  ││                           ││                           │
+│     621798483770376191)   ││   END, CASE  WHEN (NULL)  ││                           ││    Total Files Read: 1    │
+│                           ││     THEN (CAST('invalid   ││                           ││                           │
+│    Total Files Read: 1    ││    geometry' AS DOUBLE))  ││                           ││        Filename(s):       │
+│                           ││   ELSE ST_X(CAST(geometry ││                           ││  https://overturemaps-us  │
+│        Filename(s):       ││     AS GEOMETRY)) END,    ││                           ││    -west-2.s3.us-west-2   │
+│  https://overturemaps-us  ││     621798483770376191)   ││                           ││   .amazonaws.com/release  │
+│    -west-2.s3.us-west-2   ││                           ││                           ││ /2026-09-23.1/theme=places│
+│   .amazonaws.com/release  ││    Total Files Read: 1    ││                           ││   /type=place/part-00011  │
+│ /2026-09-23.1/theme=places││                           ││                           ││  -9aa07e3a-309b-5031-8820 │
+│   /type=place/part-00011  ││        Filename(s):       ││                           ││  -4ec743a80d43-c000.zstd  │
+│  -9aa07e3a-309b-5031-8820 ││  https://overturemaps-us  ││                           ││          .parquet         │
+│  -4ec743a80d43-c000.zstd  ││    -west-2.s3.us-west-2   ││                           ││                           │
+│          .parquet         ││   .amazonaws.com/release  ││                           ││                           │
+│                           ││ /2026-09-23.1/theme=places││                           ││                           │
+│                           ││   /type=place/part-00011  ││                           ││                           │
+│                           ││  -9aa07e3a-309b-5031-8820 ││                           ││           88.14s          │
+│                           ││  -4ec743a80d43-c000.zstd  ││                           ││                           │
+│           2.94s           ││          .parquet         ││                           ││                           │
+│                           ││                           ││                           ││                           │
+│                           ││                           ││                           ││                           │
+│                           ││                           ││                           ││                           │
+│          58 rows          ││           0 rows          ││           0 rows          ││           0 rows          │
+│          (2.94s)          ││           4.42s           ││         (125.73s)         ││          (88.14s)         │
+└───────────────────────────┘└───────────────────────────┘└───────────────────────────┘└───────────────────────────┘

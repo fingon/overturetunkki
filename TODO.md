@@ -4,8 +4,8 @@ The repository contains the design and the completed native dependency build,
 H3 filtering, bounded worker query/output validation, GeoParquet writer
 compatibility, typed command configuration, CI build gates, catalog validation,
 catalog observation, cache ownership/admission and persistence primitives, and
-the tested HTTP endpoint contract and its request/operations controls. Remaining
-items below are pending;
+the tested HTTP endpoint contract and its request/operations controls. All
+items below are completed;
 [DESIGN.md](DESIGN.md) defines the intended behavior.
 
 ## 1. Resolve implementation gates
@@ -126,3 +126,17 @@ items below are pending;
 
 - [x] Support native macOS clients, Linux Podman builds with ko as a Go tool,
   and GitHub Actions host and container checks for amd64 and arm64.
+
+- [x] Validate live tile performance for Helsinki cell `8a1126d33027fff` after
+  catalog-bbox file selection. On release `2026-09-23.1`, selection reduces 16
+  files to partition `00011` (632751442 source bytes). Use the pinned Linux
+  service, a 300-second server deadline and a longer client deadline; record
+  Parquet scan plan/profile, HTTP request count and transfer bytes, query/COPY
+  timings, validated output IDs, and a repeated cache hit. The recorded
+  [live measurements](testdata/performance/2026-09-23.1-helsinki/README.md)
+  confirm projection pushdown and successful completion within 300 seconds.
+  Disjoint bbox branches preserve unpruned H3 results for null/invalid/wrapped
+  bboxes and one global row limit. The final run took 185 seconds, 775 GETs,
+  and 95.1 MiB; its 58 IDs and digest match the 244-second baseline, and its
+  cache hit took 273 ms. Fallback scans remain expensive; the measured latency
+  improvement trades off increased transfer and does not promise fast cold tiles.

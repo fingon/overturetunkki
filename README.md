@@ -3,7 +3,8 @@
 This repository builds a Go 1.27 service that serves bounded, zstd-compressed
 GeoParquet POI tiles by H3 cell. The service discovers Overture's STAC catalog,
 pins each request to a catalog version, queries the places assets through
-DuckDB, and keeps successful tiles in a bounded disk cache. The HTTP API also
+DuckDB, selects source partitions by conservative spatial bounds, and keeps
+successful tiles in a bounded disk cache. The HTTP API also
 reports request IDs, freshness changes, finer-cell guidance, and retryable
 capacity or upstream failures.
 
@@ -192,11 +193,24 @@ podman run --rm -p 8080:8080 --read-only --cap-drop=ALL \
 `make build-linux` builds Linux binaries through the same Podman toolchain.
 Builds default to the host architecture; another `TARGET_ARCH` requires
 Podman emulation support. GitHub Actions checks Linux amd64/arm64 and runs
-Linux image smoke and lifecycle tests.
+Linux image smoke and lifecycle tests, caching Go dependencies and builds
+for both host and Podman jobs, plus lint tool environments and results.
 The service remains Linux-only; native macOS service builds are unsupported.
 
 Successful pushes to `main` publish the service as a multi-platform image at
 `ghcr.io/fingon/overturetunkki/service:latest` for Linux amd64 and arm64.
+
+Tile build logs report selected source files and phase timings. Selected asset
+bytes are full object sizes, not bytes downloaded. With `-v`, workers also
+record the executed Parquet scan profile, including its selected columns and
+HTTP request/transfer statistics. For timeout diagnosis, set
+`OVERTURE_TILE_TIMEOUT` in the container and give `overture-client --timeout`
+a longer deadline so it can receive the server's response. Increasing deadlines
+alone does not fix slow remote reads.
+The [recorded Helsinki run](testdata/performance/2026-09-23.1-helsinki/README.md)
+completed in 185 seconds with the selected fields; cold tiles can remain slow
+because conservative malformed-bbox checks read widely. Its repeated cache
+hit took 273 ms.
 
 Install repository hooks with `make hooks`. See [DESIGN.md](DESIGN.md) for the
 architecture and HTTP contract, and [TODO.md](TODO.md) for the completed

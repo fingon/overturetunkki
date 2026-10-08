@@ -44,17 +44,21 @@ type QueryPlan struct {
 }
 
 type PreparedQuery struct {
-	SQL  string
-	Args []any
+	Profile            *TileDiagnostics
+	SQL                string
+	Args               []any
+	SelectedAssetCount int
+	SelectedAssetBytes int64
 }
 
 type TileBuildRequest struct {
-	Conn       *sql.Conn
-	Plan       QueryPlan
-	Snapshot   catalog.Snapshot
-	MaxRows    int64
-	OutputPath string
-	MaxBytes   int64
+	Conn        *sql.Conn
+	Plan        QueryPlan
+	Snapshot    catalog.Snapshot
+	MaxRows     int64
+	OutputPath  string
+	MaxBytes    int64
+	Diagnostics *TileDiagnostics
 }
 
 type candidateCopyRequest struct {
@@ -99,33 +103,44 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 	if err != nil {
 		return PreparedQuery{}, fmt.Errorf("build candidate query: %w", err)
 	}
-	assetURLs, err := pinnedAssetURLs(snapshot)
-	if err != nil {
-		return PreparedQuery{}, err
-	}
 	bounds, err := h3filter.CellBounds(plan.Cell)
 	if err != nil {
 		return PreparedQuery{}, fmt.Errorf("build candidate query bounds: %w", err)
 	}
-	bboxSQL, bboxArgs := bounds.DuckDBBBoxPredicate()
+	assetURLs, selectedBytes, err := pinnedAssetURLs(snapshot, bounds)
+	if err != nil {
+		return PreparedQuery{}, err
+	}
+	selectedCount := len(assetURLs)
+	if selectedCount == 0 {
+		return PreparedQuery{
+			SQL:  "SELECT " + candidateProjectionSQL(plan.Columns) + " FROM read_parquet([?]) WHERE FALSE",
+			Args: []any{snapshot.Manifest[0].Href},
+		}, nil
+	}
 	projectionSQL := candidateProjectionSQL(plan.Columns)
 	placeholders := make([]string, len(assetURLs))
-	args := make([]any, 0, len(assetURLs)+len(bboxArgs)+2)
-	for index, assetURL := range assetURLs {
+	for index := range assetURLs {
 		placeholders[index] = "?"
-		args = append(args, assetURL)
 	}
-	args = append(args, bboxArgs...)
-	args = append(args, plan.CellValue, rowLimit)
+	branches := bounds.DuckDBBBoxBranches()
+	queries := make([]string, 0, len(branches))
+	var args []any
+	for _, branch := range branches {
+		queries = append(queries, fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE (%s) AND %s",
+			projectionSQL, strings.Join(placeholders, ", "), branch.Predicate, exactMembershipSQL()))
+		for _, assetURL := range assetURLs {
+			args = append(args, assetURL)
+		}
+		args = append(args, branch.Args...)
+		args = append(args, plan.CellValue)
+	}
+	args = append(args, rowLimit)
 	return PreparedQuery{
-		SQL: fmt.Sprintf(
-			"SELECT %s FROM read_parquet([%s]) WHERE %s AND %s LIMIT ?",
-			projectionSQL,
-			strings.Join(placeholders, ", "),
-			bboxSQL,
-			exactMembershipSQL(),
-		),
-		Args: args,
+		SQL:                "SELECT * FROM (" + strings.Join(queries, " UNION ALL ") + ") AS candidates LIMIT ?",
+		Args:               args,
+		SelectedAssetCount: selectedCount,
+		SelectedAssetBytes: selectedBytes,
 	}, nil
 }
 
@@ -136,18 +151,30 @@ func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error
 	if request.Conn == nil {
 		return CopyResult{}, errors.New("build tile: DuckDB connection is nil")
 	}
+	finishPlanning := request.Diagnostics.start(tileStagePlanning)
 	query, err := BuildCandidateQuery(request.Plan, request.Snapshot, request.MaxRows)
+	finishPlanning()
 	if err != nil {
 		return CopyResult{}, err
+	}
+	if request.Diagnostics != nil {
+		request.Diagnostics.SelectedAssetCount = query.SelectedAssetCount
+		request.Diagnostics.SelectedAssetBytes = query.SelectedAssetBytes
+		if request.Diagnostics.ProfileEnabled {
+			query.Profile = request.Diagnostics
+		}
 	}
 	metadata, err := candidateMetadata(request.Plan)
 	if err != nil {
 		return CopyResult{}, err
 	}
+	finishMaterialize := request.Diagnostics.start(tileStageMaterialize)
 	candidates, err := materializeCandidates(ctx, request.Conn, query, request.MaxRows)
+	finishMaterialize()
 	if err != nil {
 		return CopyResult{}, err
 	}
+	finishCopy := request.Diagnostics.start(tileStageCopy)
 	copyResult, copyErr := candidates.copy(candidateCopyRequest{
 		Context:    ctx,
 		Conn:       request.Conn,
@@ -155,6 +182,7 @@ func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error
 		Metadata:   metadata,
 		MaxBytes:   request.MaxBytes,
 	})
+	finishCopy()
 	dropErr := candidates.drop(ctx, request.Conn)
 	if copyErr != nil {
 		if dropErr != nil {
@@ -185,8 +213,15 @@ func materializeCandidates(ctx context.Context, conn *sql.Conn, query PreparedQu
 		return candidateRows{}, err
 	}
 	createSQL := "CREATE TEMPORARY TABLE " + candidateTableName + " AS " + query.SQL
-	if _, err := conn.ExecContext(ctx, createSQL, query.Args...); err != nil {
-		return candidateRows{}, fmt.Errorf("materialize candidates: %w", err)
+	if query.Profile != nil {
+		var profileKey string
+		if err := conn.QueryRowContext(ctx, "EXPLAIN ANALYZE "+createSQL, query.Args...).Scan(&profileKey, &query.Profile.MaterializeProfile); err != nil {
+			return candidateRows{}, fmt.Errorf("profile materialized candidates: %w", err)
+		}
+	} else {
+		if _, err := conn.ExecContext(ctx, createSQL, query.Args...); err != nil {
+			return candidateRows{}, fmt.Errorf("materialize candidates: %w", err)
+		}
 	}
 	var rowCount int64
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM "+candidateTableName).Scan(&rowCount); err != nil {
@@ -274,39 +309,42 @@ func ParseCanonicalCell(value string) (h3.Cell, error) {
 	return cell, nil
 }
 
-func pinnedAssetURLs(snapshot catalog.Snapshot) ([]string, error) {
+func pinnedAssetURLs(snapshot catalog.Snapshot, bounds h3filter.Bounds) (assetURLs []string, selectedBytes int64, err error) {
 	if len(snapshot.Manifest) == 0 {
-		return nil, errors.New("build candidate query: catalog manifest is empty")
+		return nil, 0, errors.New("build candidate query: catalog manifest is empty")
 	}
 	assetHost := snapshot.AssetHost
 	if assetHost == "" {
 		assetHost = catalog.DefaultAssetHost
 	}
 	prefix := fmt.Sprintf("/release/%s/theme=%s/type=%s/", snapshot.Release, placesTheme, placesType)
-	assetURLs := make([]string, 0, len(snapshot.Manifest))
+	assetURLs = make([]string, 0, len(snapshot.Manifest))
 	seen := make(map[string]struct{}, len(snapshot.Manifest))
 	for index, asset := range snapshot.Manifest {
 		parsed, err := url.Parse(asset.Href)
 		if err != nil {
-			return nil, fmt.Errorf("validate manifest asset %d: %w", index, err)
+			return nil, 0, fmt.Errorf("validate manifest asset %d: %w", index, err)
 		}
 		if parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, assetHost) || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return nil, fmt.Errorf("validate manifest asset %d: URL is not a trusted HTTPS asset", index)
+			return nil, 0, fmt.Errorf("validate manifest asset %d: URL is not a trusted HTTPS asset", index)
 		}
 		assetName := path.Base(parsed.Path)
 		if path.Clean(parsed.Path) != parsed.Path || !strings.HasPrefix(parsed.Path, prefix) || !strings.HasPrefix(assetName, "part-"+asset.PartitionID+"-") || !strings.HasSuffix(assetName, assetPathSuffix) {
-			return nil, fmt.Errorf("validate manifest asset %d: URL is outside the trusted places prefix", index)
+			return nil, 0, fmt.Errorf("validate manifest asset %d: URL is outside the trusted places prefix", index)
 		}
 		if asset.PartitionID == "" || asset.SizeBytes <= 0 || asset.RowCount <= 0 || asset.RowGroupCount <= 0 {
-			return nil, fmt.Errorf("validate manifest asset %d: metadata is invalid", index)
+			return nil, 0, fmt.Errorf("validate manifest asset %d: metadata is invalid", index)
 		}
 		if _, ok := seen[asset.Href]; ok {
-			return nil, fmt.Errorf("validate manifest asset %d: URL is repeated", index)
+			return nil, 0, fmt.Errorf("validate manifest asset %d: URL is repeated", index)
 		}
 		seen[asset.Href] = struct{}{}
-		assetURLs = append(assetURLs, asset.Href)
+		if bounds.IntersectsBBox(asset.BBox[0], asset.BBox[2], asset.BBox[1], asset.BBox[3]) {
+			assetURLs = append(assetURLs, asset.Href)
+			selectedBytes += asset.SizeBytes
+		}
 	}
-	return assetURLs, nil
+	return assetURLs, selectedBytes, nil
 }
 
 func candidateProjectionSQL(columns []catalog.Column) string {

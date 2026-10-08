@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	// Register DuckDB's database/sql driver.
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -94,6 +96,7 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 		return nil, err
 	}
 	settings := worker.RuntimeSettings{
+		Profile:          cfg.Verbose,
 		MemoryBytes:      cfg.WorkerMemoryBytes,
 		Threads:          cfg.WorkerThreads,
 		ScratchDirectory: filepath.Join(cfg.CacheDir, "scratch"),
@@ -323,8 +326,9 @@ type tileWorkerRequest struct {
 }
 
 type tileWorkerResponse struct {
-	Result *worker.TileResult `json:"result,omitempty"`
-	Error  *tileWorkerError   `json:"error,omitempty"`
+	Diagnostics *worker.TileDiagnostics `json:"diagnostics,omitempty"`
+	Result      *worker.TileResult      `json:"result,omitempty"`
+	Error       *tileWorkerError        `json:"error,omitempty"`
 }
 
 type tileWorkerError struct {
@@ -348,7 +352,7 @@ const (
 	workerErrorInvalidOutput  = "invalid_output"
 )
 
-func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, request tileWorkerRequest) (worker.TileResult, error) {
+func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, request tileWorkerRequest) (result worker.TileResult, err error) {
 	if ctx == nil {
 		return worker.TileResult{}, errors.New("run isolated tile worker: context is nil")
 	}
@@ -358,6 +362,30 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 	if cacheDir == "" {
 		return worker.TileResult{}, errors.New("run isolated tile worker: cache directory is empty")
 	}
+	started := time.Now()
+	plan, err := worker.BuildQueryPlan(worker.TileRequest{Cell: request.Cell}, request.Fields, request.Snapshot.Schema)
+	if err != nil {
+		return worker.TileResult{}, err
+	}
+	query, err := worker.BuildCandidateQuery(plan, request.Snapshot, request.MaxRows)
+	if err != nil {
+		return worker.TileResult{}, err
+	}
+	slog.Info("tile worker started", "cell", request.Cell, "release", request.Snapshot.Release,
+		"manifest_asset_count", len(request.Snapshot.Manifest), "selected_asset_count", query.SelectedAssetCount,
+		"selected_asset_bytes", query.SelectedAssetBytes, "tile_timeout_sec", request.Settings.TileTimeout.Seconds())
+	workerDiagnostics := worker.TileDiagnostics{Stage: "process", SelectedAssetCount: query.SelectedAssetCount, SelectedAssetBytes: query.SelectedAssetBytes}
+	defer func() {
+		logLevel := slog.LevelInfo
+		if err != nil {
+			logLevel = slog.LevelWarn
+		}
+		slog.Log(ctx, logLevel, "tile worker finished", "cell", request.Cell, "release", request.Snapshot.Release,
+			"elapsed_ms", time.Since(started).Milliseconds(), "stage", workerDiagnostics.Stage,
+			"selected_asset_count", workerDiagnostics.SelectedAssetCount, "selected_asset_bytes", workerDiagnostics.SelectedAssetBytes,
+			"planning_ms", workerDiagnostics.PlanningMS, "materialize_ms", workerDiagnostics.MaterializeMS,
+			"copy_ms", workerDiagnostics.CopyMS, "validation_ms", workerDiagnostics.ValidationMS, "error", err)
+	}()
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return worker.TileResult{}, fmt.Errorf("encode isolated tile request: %w", err)
@@ -396,6 +424,13 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 	var response tileWorkerResponse
 	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
 		return worker.TileResult{}, fmt.Errorf("decode isolated tile worker response: %w", err)
+	}
+	if response.Diagnostics != nil {
+		workerDiagnostics = *response.Diagnostics
+		if workerDiagnostics.MaterializeProfile != "" {
+			slog.Debug("tile scan profile", "cell", request.Cell, "release", request.Snapshot.Release,
+				"profile", workerDiagnostics.MaterializeProfile)
+		}
 	}
 	if response.Error != nil {
 		return worker.TileResult{}, decodeTileWorkerError(*response.Error)
@@ -514,8 +549,9 @@ func runWorkerProtocol(ctx context.Context) error {
 		}
 		return fmt.Errorf("decode worker request trailer: %w", err)
 	}
-	result, err := executeWorkerRequest(ctx, request)
-	response := tileWorkerResponse{Result: &result}
+	diagnostics := worker.TileDiagnostics{Stage: "initialize"}
+	result, err := executeWorkerRequest(ctx, request, &diagnostics)
+	response := tileWorkerResponse{Result: &result, Diagnostics: &diagnostics}
 	if err != nil {
 		response.Result = nil
 		encoded := encodeTileWorkerErrorWithLimit(err, request.Settings.MaxOutputBytes)
@@ -527,7 +563,7 @@ func runWorkerProtocol(ctx context.Context) error {
 	return nil
 }
 
-func executeWorkerRequest(ctx context.Context, request tileWorkerRequest) (result worker.TileResult, err error) {
+func executeWorkerRequest(ctx context.Context, request tileWorkerRequest, diagnostics *worker.TileDiagnostics) (result worker.TileResult, err error) {
 	if request.OutputPath == "" {
 		return worker.TileResult{}, errors.New("worker request output path is empty")
 	}
@@ -570,12 +606,13 @@ func executeWorkerRequest(ctx context.Context, request tileWorkerRequest) (resul
 		return worker.TileResult{}, err
 	}
 	return worker.BuildTileWithSettings(ctx, worker.RuntimeTileRequest{
-		Conn:       connection,
-		Plan:       plan,
-		Snapshot:   request.Snapshot,
-		MaxRows:    request.MaxRows,
-		OutputPath: request.OutputPath,
-		Settings:   request.Settings,
+		Conn:        connection,
+		Plan:        plan,
+		Snapshot:    request.Snapshot,
+		MaxRows:     request.MaxRows,
+		OutputPath:  request.OutputPath,
+		Settings:    request.Settings,
+		Diagnostics: diagnostics,
 	})
 }
 

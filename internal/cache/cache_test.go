@@ -595,3 +595,59 @@ func waitForCacheStats(t *testing.T, cache *Cache, expected Stats) {
 	}
 	assert.DeepEqual(t, cache.Stats(), expected)
 }
+
+func TestSchedulerCanceledCallerDoesNotCancelSharedBuild(t *testing.T) {
+	tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	scheduler, err := NewScheduler(tileCache, SchedulerOptions{Workers: 1, QueueCapacity: 1})
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	defer func() { assert.NilError(t, scheduler.Close()); assert.NilError(t, tileCache.Close()) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() {
+		first <- scheduler.Do(ctx, testKey(), 10, func(ctx context.Context, _ *Reservation) error {
+			close(started)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+	<-started
+	go func() {
+		second <- scheduler.Do(context.Background(), testKey(), 10, func(context.Context, *Reservation) error { return errors.New("shared build ran twice") })
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		scheduler.mu.Lock()
+		waiters := 0
+		for _, current := range scheduler.jobs {
+			waiters = current.waiters
+		}
+		scheduler.mu.Unlock()
+		if waiters == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second caller did not attach")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	assert.Assert(t, errors.Is(<-first, context.Canceled))
+	release <- struct{}{}
+	assert.NilError(t, <-second)
+}

@@ -11,11 +11,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -30,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/fingon/overturetunkki/internal/geoparquet"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
@@ -63,11 +66,16 @@ type fixtureServer struct {
 	baseURL  string
 	certPath string
 
-	mu         sync.Mutex
-	mode       fixtureMode
-	release    string
-	assetDelay time.Duration
-	assetBytes []byte
+	mu                 sync.Mutex
+	mode               fixtureMode
+	release            string
+	assetDelay         time.Duration
+	assetBytes         []byte
+	sanFranciscoBytes  []byte
+	helsinkiBytes      []byte
+	assetRequests      map[string]int
+	assetTransferBytes int64
+	wideBounds         bool
 }
 
 func TestContainerLifecycle(t *testing.T) {
@@ -102,6 +110,32 @@ func TestContainerLifecycle(t *testing.T) {
 		catalog := fetchCatalog(t, client, container.url("/v1/catalog"))
 		body, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: catalog.CatalogVersion, cell: testCell(t, 9), wantStatus: http.StatusOK})
 		validateTile(t, body)
+		assert.DeepEqual(t, tileIDs(t, body), []string{"poi-2"})
+		assetRequests, transferBytes := fixture.assetStats()
+		for assetPath, count := range assetRequests {
+			assert.Assert(t, strings.HasPrefix(filepath.Base(assetPath), "part-00002-"), assetPath)
+			assert.Assert(t, count > 0)
+		}
+		assert.Assert(t, len(assetRequests) > 0)
+		t.Logf("pruned source transfer_bytes=%d", transferBytes)
+		emptyCell, cellErr := h3.LatLngToCell(h3.NewLatLng(88, 45), 9)
+		assert.NilError(t, cellErr)
+		emptyBody, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: catalog.CatalogVersion, cell: emptyCell, wantStatus: http.StatusOK})
+		validateTile(t, emptyBody)
+		assert.DeepEqual(t, tileIDs(t, emptyBody), []string{})
+		fixture.setWideBounds(rolloverRelease, true)
+		defer fixture.setWideBounds(fixtureRelease, false)
+		unprunedCatalog := waitForCatalogRelease(t, client, container.url("/v1/catalog"), rolloverRelease)
+		unprunedBody, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: unprunedCatalog.CatalogVersion, cell: testCell(t, 9), wantStatus: http.StatusOK})
+		assert.DeepEqual(t, tileIDs(t, body), tileIDs(t, unprunedBody))
+		assetRequests, _ = fixture.assetStats()
+		unprunedAssetCount := 0
+		for assetPath := range assetRequests {
+			if strings.Contains(assetPath, "/"+rolloverRelease+"/") {
+				unprunedAssetCount++
+			}
+		}
+		assert.Equal(t, unprunedAssetCount, 16)
 	})
 	cacheDirectory := t.TempDir()
 	if err := os.Chmod(cacheDirectory, 0o777); err != nil {
@@ -391,12 +425,15 @@ func newFixtureServer(t *testing.T) *fixtureServer {
 	}
 	port := tcpAddress.Port
 	fixture := &fixtureServer{
-		t:          t,
-		listener:   listener,
-		baseURL:    "https://" + fixtureHostname + ":" + strconv.Itoa(port),
-		certPath:   certificateFile,
-		release:    fixtureRelease,
-		assetBytes: fixtureFile(t, filepath.Join("testdata", "places.parquet")),
+		t:                 t,
+		listener:          listener,
+		baseURL:           "https://" + fixtureHostname + ":" + strconv.Itoa(port),
+		certPath:          certificateFile,
+		release:           fixtureRelease,
+		assetBytes:        fixtureFile(t, filepath.Join("testdata", "empty.parquet")),
+		sanFranciscoBytes: fixtureFile(t, filepath.Join("testdata", "san-francisco.parquet")),
+		helsinkiBytes:     fixtureFile(t, filepath.Join("testdata", "helsinki.parquet")),
+		assetRequests:     make(map[string]int),
 	}
 	keyPair, err := tlsKeyPair(certificate, key)
 	if err != nil {
@@ -440,17 +477,30 @@ func (fixture *fixtureServer) serveHTTP(responseWriter http.ResponseWriter, requ
 	if isAsset {
 		if delay > 0 {
 			timer := time.NewTimer(delay)
-			<-timer.C
-		}
-		responseWriter.Header().Set("Content-Type", "application/vnd.apache.parquet")
-		responseWriter.Header().Set("ETag", "\"fixture-asset\"")
-		responseWriter.Header().Set("Content-Length", strconv.Itoa(len(fixture.assetBytes)))
-		responseWriter.WriteHeader(http.StatusOK)
-		if request.Method != http.MethodHead {
-			if _, err := responseWriter.Write(fixture.assetBytes); err != nil {
-				fixture.t.Logf("write fixture asset: %v", err)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-request.Context().Done():
+				return
 			}
 		}
+		assetBytes := fixture.assetBytes
+		switch {
+		case strings.HasPrefix(filepath.Base(request.URL.Path), "part-00002-"):
+			assetBytes = fixture.sanFranciscoBytes
+		case strings.HasPrefix(filepath.Base(request.URL.Path), "part-00011-"):
+			assetBytes = fixture.helsinkiBytes
+		}
+		fixture.mu.Lock()
+		fixture.assetRequests[request.URL.Path]++
+		fixture.mu.Unlock()
+		responseWriter.Header().Set("Content-Type", "application/vnd.apache.parquet")
+		responseWriter.Header().Set("ETag", "\"fixture-asset\"")
+		counter := &fixtureTransferWriter{ResponseWriter: responseWriter}
+		http.ServeContent(counter, request, filepath.Base(request.URL.Path), time.Unix(0, 0), bytes.NewReader(assetBytes))
+		fixture.mu.Lock()
+		fixture.assetTransferBytes += counter.bytes
+		fixture.mu.Unlock()
 		return
 	}
 	body, err := fixture.document(request.URL.Path, release)
@@ -492,6 +542,19 @@ func (fixture *fixtureServer) document(requestPath, release string) ([]byte, err
 	body = bytes.ReplaceAll(body, []byte("https://stac.overturemaps.org"), []byte(fixture.baseURL))
 	body = bytes.ReplaceAll(body, []byte("https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com"), []byte(fixture.baseURL))
 	body = bytes.ReplaceAll(body, []byte(fixtureRelease), []byte(release))
+	fixture.mu.Lock()
+	wideBounds := fixture.wideBounds
+	fixture.mu.Unlock()
+	if wideBounds {
+		var document map[string]any
+		if err := json.Unmarshal(body, &document); err != nil {
+			return nil, err
+		}
+		if document["type"] == "Feature" {
+			document["bbox"] = []float64{-180, -90, 180, 90}
+			return json.Marshal(document)
+		}
+	}
 	return body, nil
 }
 
@@ -531,6 +594,30 @@ func fetchCatalog(t *testing.T, client *http.Client, endpoint string) wireCatalo
 	var result wireCatalog
 	assert.NilError(t, json.NewDecoder(response.Body).Decode(&result))
 	return result
+}
+
+func waitForCatalogRelease(t *testing.T, client *http.Client, endpoint, release string) wireCatalog {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := client.Get(endpoint)
+		if err != nil {
+			t.Logf("catalog transition request: %v", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		var result wireCatalog
+		if response.StatusCode == http.StatusOK {
+			assert.NilError(t, json.NewDecoder(response.Body).Decode(&result))
+		}
+		assert.NilError(t, response.Body.Close())
+		if result.Release == release {
+			return result
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("catalog did not transition to release %s", release)
+	return wireCatalog{}
 }
 
 type tileFetchOptions struct {
@@ -651,7 +738,7 @@ func waitForWorkerPID(t *testing.T, name string) int {
 
 func testCell(tb testing.TB, resolution int) h3.Cell {
 	tb.Helper()
-	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), resolution)
+	cell, err := h3.LatLngToCell(h3.NewLatLng(37.7749, -122.4194), resolution)
 	assert.NilError(tb, err)
 	return cell
 }
@@ -737,4 +824,56 @@ func fixtureFile(t *testing.T, name string) []byte {
 	body, err := os.ReadFile(name)
 	assert.NilError(t, err)
 	return body
+}
+
+func (fixture *fixtureServer) setWideBounds(release string, wide bool) {
+	fixture.mu.Lock()
+	fixture.release = release
+	fixture.wideBounds = wide
+	fixture.mu.Unlock()
+}
+
+func (fixture *fixtureServer) assetStats() (requests map[string]int, transferBytes int64) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	requests = make(map[string]int, len(fixture.assetRequests))
+	maps.Copy(requests, fixture.assetRequests)
+	return requests, fixture.assetTransferBytes
+}
+
+type fixtureTransferWriter struct {
+	http.ResponseWriter
+	bytes int64
+}
+
+func (writer *fixtureTransferWriter) Write(data []byte) (int, error) {
+	count, err := writer.ResponseWriter.Write(data)
+	writer.bytes += int64(count)
+	return count, err
+}
+
+func tileIDs(t *testing.T, body []byte) []string {
+	t.Helper()
+	filePath := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(filePath, body, 0o600))
+	database, err := sql.Open("duckdb", "")
+	assert.NilError(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { assert.NilError(t, database.Close()) }()
+	rows, err := database.Query("SELECT id FROM read_parquet(?) ORDER BY id", filePath)
+	assert.NilError(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { assert.NilError(t, rows.Close()) }()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		assert.NilError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	assert.NilError(t, rows.Err())
+	return ids
 }

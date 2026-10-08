@@ -19,6 +19,11 @@ const (
 	minLongitudeDeg          = -180.0
 	maxLongitudeDeg          = 180.0
 	angularMarginRad         = 1e-12
+	unprunedPredicateSQL     = "TRUE"
+	bboxLatitudeValidSQL     = "bbox.ymin IS NOT NULL AND bbox.ymax IS NOT NULL AND bbox.ymin >= -90 AND bbox.ymax <= 90 AND bbox.ymin <= bbox.ymax"
+	bboxLongitudeValidSQL    = "bbox.xmin IS NOT NULL AND bbox.xmax IS NOT NULL AND bbox.xmin >= -180 AND bbox.xmin <= 180 AND bbox.xmax >= -180 AND bbox.xmax <= 180"
+	bboxLatitudeInvalidSQL   = "bbox.ymin IS NULL OR bbox.ymax IS NULL OR bbox.ymin < -90 OR bbox.ymin > 90 OR bbox.ymax < -90 OR bbox.ymax > 90 OR bbox.ymin > bbox.ymax"
+	bboxLongitudeInvalidSQL  = "bbox.xmin IS NULL OR bbox.xmax IS NULL OR bbox.xmin < -180 OR bbox.xmin > 180 OR bbox.xmax < -180 OR bbox.xmax > 180"
 )
 
 type LongitudeInterval struct {
@@ -30,6 +35,11 @@ type Bounds struct {
 	LatitudeMinDeg     float64
 	LatitudeMaxDeg     float64
 	LongitudeIntervals []LongitudeInterval
+}
+
+type BBoxQueryBranch struct {
+	Predicate string
+	Args      []any
 }
 
 func GlobalBounds() Bounds {
@@ -215,7 +225,7 @@ func (bounds Bounds) IsGlobal() bool {
 
 func (bounds Bounds) DuckDBBBoxPredicate() (string, []any) {
 	if bounds.IsGlobal() || len(bounds.LongitudeIntervals) == 0 {
-		return "TRUE", nil
+		return unprunedPredicateSQL, nil
 	}
 
 	longitudePredicates := make([]string, 0, len(bounds.LongitudeIntervals))
@@ -235,6 +245,36 @@ func (bounds Bounds) DuckDBBBoxPredicate() (string, []any) {
 		"bbox.xmax < -180 OR bbox.xmax > 180 OR bbox.ymin < -90 OR " +
 		"bbox.ymin > 90 OR bbox.ymax < -90 OR bbox.ymax > 90 OR " +
 		"(bbox.ymax >= ? AND bbox.ymin <= ? AND (" + joinPredicates(longitudePredicates) + "))) ", args
+}
+
+func (bounds Bounds) DuckDBBBoxBranches() []BBoxQueryBranch {
+	if bounds.IsGlobal() || len(bounds.LongitudeIntervals) == 0 {
+		return []BBoxQueryBranch{{Predicate: unprunedPredicateSQL}}
+	}
+	ordinaryLongitude := make([]string, 0, len(bounds.LongitudeIntervals))
+	wrappedLongitude := make([]string, 0, len(bounds.LongitudeIntervals))
+	ordinaryArgs := []any{bounds.LatitudeMinDeg, bounds.LatitudeMaxDeg}
+	wrappedArgs := append([]any(nil), ordinaryArgs...)
+	for _, interval := range bounds.LongitudeIntervals {
+		ordinaryLongitude = append(ordinaryLongitude, "(bbox.xmax >= ? AND bbox.xmin <= ?)")
+		wrappedLongitude = append(wrappedLongitude, "(bbox.xmin <= ? OR bbox.xmax >= ?)")
+		ordinaryArgs = append(ordinaryArgs, interval.MinDeg, interval.MaxDeg)
+		wrappedArgs = append(wrappedArgs, interval.MaxDeg, interval.MinDeg)
+	}
+	validBBoxSQL := "(" + bboxLatitudeValidSQL + ") AND (" + bboxLongitudeValidSQL + ")"
+	latitudeOverlapSQL := "bbox.ymax >= ? AND bbox.ymin <= ?"
+	return []BBoxQueryBranch{
+		{
+			Predicate: validBBoxSQL + " AND bbox.xmin <= bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(ordinaryLongitude) + ")",
+			Args:      ordinaryArgs,
+		},
+		{
+			Predicate: validBBoxSQL + " AND bbox.xmin > bbox.xmax AND " + latitudeOverlapSQL + " AND (" + joinPredicates(wrappedLongitude) + ")",
+			Args:      wrappedArgs,
+		},
+		{Predicate: "(" + bboxLatitudeInvalidSQL + ")"},
+		{Predicate: "(" + bboxLatitudeValidSQL + ") AND (" + bboxLongitudeInvalidSQL + ")"},
+	}
 }
 
 func CellContains(latitudeDeg, longitudeDeg float64, requestedCell h3.Cell) (bool, error) {

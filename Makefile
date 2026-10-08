@@ -6,7 +6,8 @@ KO = $(GO) tool -modfile=build/tools/go.mod ko
 PODMAN ?= podman
 include build/versions.env
 BUILDER_IMAGE := docker.io/library/golang:$(GO_VERSION)-bookworm
-LINUX_RUN = $(PODMAN) run --rm --platform linux/$(TARGET_ARCH) --userns=keep-id -e GOCACHE=/go/build-cache -e XDG_CONFIG_HOME=/tmp/config -e GOPATH=/go -v overturetunkki-go:/go -v "$(CURDIR):/src" -w /src $(BUILDER_IMAGE)
+GO_CACHE_VOLUME ?= overturetunkki-go
+LINUX_RUN = $(PODMAN) run --rm --platform linux/$(TARGET_ARCH) --userns=keep-id -e GOCACHE=/go/build-cache -e XDG_CONFIG_HOME=/tmp/config -e GOPATH=/go -v "$(GO_CACHE_VOLUME):/go" -v "$(CURDIR):/src" -w /src $(BUILDER_IMAGE)
 HOST_OS := $(shell $(GO) env GOOS)
 TARGET_ARCH ?= $(shell $(GO) env GOARCH)
 CGO_ENABLED ?= 1

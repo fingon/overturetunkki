@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -498,6 +499,7 @@ func TestServerMapsTileFailuresAndCatalogReadiness(t *testing.T) {
 		{name: "queue full", err: cache.ErrQueueFull, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
 		{name: "out of memory", err: worker.ErrOutOfMemory, status: http.StatusServiceUnavailable, code: "capacity_unavailable"},
 		{name: "timeout", err: worker.ErrTileTimeout, status: http.StatusGatewayTimeout, code: "tile_timeout"},
+		{name: "caller detached", err: fmt.Errorf("cache job caller detached: %w", context.Canceled), status: http.StatusGatewayTimeout, code: "tile_timeout"},
 		{name: "canceled", err: worker.ErrTileCanceled, status: http.StatusGatewayTimeout, code: "tile_timeout"},
 		{name: "upstream", err: worker.ErrUpstream, status: http.StatusServiceUnavailable, code: "upstream_unavailable"},
 	}

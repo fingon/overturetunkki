@@ -6,6 +6,9 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/uber/h3-go/v4"
@@ -304,6 +307,16 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 	})
 
 	createSyntheticPointTable(t, connection, points)
+	parquetPath := filepath.Join(t.TempDir(), "points.parquet")
+	_, err = connection.ExecContext(context.Background(), "COPY points TO '"+parquetPath+"' (FORMAT PARQUET, COMPRESSION ZSTD)")
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	_, err = connection.ExecContext(context.Background(), "DROP TABLE points")
+	assert.NilError(t, err)
+	_, err = connection.ExecContext(context.Background(), "CREATE VIEW points AS SELECT * FROM read_parquet('"+parquetPath+"')")
+	assert.NilError(t, err)
 	var sawPruning bool
 	for index, cell := range cells {
 		t.Run(fmt.Sprintf("cell_%d_%s", index, cell), func(t *testing.T) {
@@ -313,9 +326,18 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 				return
 			}
 			predicate, predicateArgs := bounds.DuckDBBBoxPredicate()
+			if index == 0 {
+				assertParquetPredicatePushdown(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
+			}
 			unpruned := queryIDs(t, membershipQuery{connection: connection, predicate: "TRUE", cell: cell})
 			pruned := queryIDs(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 			assert.DeepEqual(t, pruned, unpruned)
+			branched := make([]int64, 0)
+			for _, branch := range bounds.DuckDBBBoxBranches() {
+				branched = append(branched, queryIDs(t, membershipQuery{connection: connection, predicate: branch.Predicate, predicateArgs: branch.Args, cell: cell})...)
+			}
+			slices.Sort(branched)
+			assert.DeepEqual(t, branched, unpruned)
 
 			candidateCount := countCandidates(t, connection, predicate, predicateArgs)
 			assert.Assert(t, candidateCount >= int64(len(unpruned)))
@@ -326,6 +348,54 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 		})
 	}
 	assert.Assert(t, sawPruning)
+}
+
+func TestBBoxBranchesKeepInvalidAndNullBoundsWithoutDuplicates(t *testing.T) {
+	connection := openDuckDBConnection(t)
+	cell := mustCell(t, 60.168, 24.943, 10)
+	center := mustCellCenter(t, cell)
+	bounds := mustCellBounds(t, cell)
+	_, err := connection.ExecContext(t.Context(), "CREATE TABLE source_rows (id BIGINT, latitude DOUBLE, longitude DOUBLE, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))")
+	assert.NilError(t, err)
+	cases := []struct {
+		name string
+		bbox [4]any
+	}{
+		{name: "ordinary", bbox: [4]any{center.Lng, center.Lng, center.Lat, center.Lat}},
+		{name: "wrapped", bbox: [4]any{20.0, -20.0, center.Lat, center.Lat}},
+		{name: "reversed latitude", bbox: [4]any{0.0, 1.0, 2.0, 1.0}},
+		{name: "null xmin", bbox: [4]any{nil, 1.0, 0.0, 1.0}},
+		{name: "null xmax", bbox: [4]any{0.0, nil, 0.0, 1.0}},
+		{name: "null ymin", bbox: [4]any{0.0, 1.0, nil, 1.0}},
+		{name: "null ymax", bbox: [4]any{0.0, 1.0, 0.0, nil}},
+		{name: "longitude too low", bbox: [4]any{-181.0, 1.0, 0.0, 1.0}},
+		{name: "longitude too high", bbox: [4]any{0.0, 181.0, 0.0, 1.0}},
+		{name: "latitude too low", bbox: [4]any{0.0, 1.0, -91.0, 1.0}},
+		{name: "latitude too high", bbox: [4]any{0.0, 1.0, 0.0, 91.0}},
+		{name: "nan longitude", bbox: [4]any{math.NaN(), 1.0, 0.0, 1.0}},
+		{name: "nan latitude", bbox: [4]any{0.0, 1.0, math.NaN(), 1.0}},
+		{name: "infinite longitude", bbox: [4]any{0.0, math.Inf(1), 0.0, 1.0}},
+		{name: "both axes invalid", bbox: [4]any{200.0, 201.0, 91.0, 92.0}},
+	}
+	for index, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := connection.ExecContext(t.Context(), "DELETE FROM source_rows")
+			assert.NilError(t, err)
+			_, err = connection.ExecContext(t.Context(), "INSERT INTO source_rows VALUES (?, ?, ?, struct_pack(xmin := ?, xmax := ?, ymin := ?, ymax := ?))",
+				int64(index), center.Lat, center.Lng, test.bbox[0], test.bbox[1], test.bbox[2], test.bbox[3])
+			assert.NilError(t, err)
+			filePath := filepath.Join(t.TempDir(), "bounds.parquet")
+			_, err = connection.ExecContext(t.Context(), "COPY source_rows TO ? (FORMAT PARQUET)", filePath)
+			assert.NilError(t, err)
+			_, err = connection.ExecContext(t.Context(), "CREATE OR REPLACE VIEW points AS SELECT * FROM read_parquet('"+strings.ReplaceAll(filePath, "'", "''")+"')")
+			assert.NilError(t, err)
+			branched := make([]int64, 0)
+			for _, branch := range bounds.DuckDBBBoxBranches() {
+				branched = append(branched, queryIDs(t, membershipQuery{connection: connection, predicate: branch.Predicate, predicateArgs: branch.Args, cell: cell})...)
+			}
+			assert.DeepEqual(t, branched, queryIDs(t, membershipQuery{connection: connection, predicate: "TRUE", cell: cell}))
+		})
+	}
 }
 
 func BenchmarkCellMembershipPruning(b *testing.B) {
@@ -550,4 +620,34 @@ func mustAntimeridianCell(tb testing.TB) h3.Cell {
 	}
 	tb.Fatal("could not find an H3 cell whose conservative bounds cross the antimeridian")
 	return 0
+}
+
+func assertParquetPredicatePushdown(t *testing.T, query membershipQuery) {
+	t.Helper()
+	args := append([]any(nil), query.predicateArgs...)
+	args = append(args, uint64(query.cell))
+	rows, err := query.connection.QueryContext(context.Background(), "EXPLAIN SELECT id FROM points WHERE "+query.predicate+" AND h3_cell_contains(latitude, longitude, CAST(? AS UBIGINT))", args...)
+	assert.NilError(t, err)
+	if err != nil {
+		return
+	}
+	defer func() { assert.NilError(t, rows.Close()) }()
+	var planBuilder strings.Builder
+	for rows.Next() {
+		var key, value string
+		assert.NilError(t, rows.Scan(&key, &value))
+		_, err = planBuilder.WriteString(value)
+		assert.NilError(t, err)
+	}
+	plan := planBuilder.String()
+	assert.NilError(t, rows.Err())
+	scanIndex := strings.LastIndex(plan, "READ_PARQUET")
+	assert.Assert(t, scanIndex >= 0, plan)
+	if scanIndex < 0 {
+		return
+	}
+	scan := plan[scanIndex:]
+	assert.Assert(t, strings.Contains(scan, "Filters:"), plan)
+	assert.Assert(t, strings.Contains(scan, "bbox"), plan)
+	t.Log(plan)
 }

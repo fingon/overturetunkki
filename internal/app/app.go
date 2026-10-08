@@ -40,7 +40,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	if err := ctx.Err(); err != nil {
 		return waitForShutdown(ctx, config.ModeSupervisor)
 	}
-	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount)
+	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount, "tile_timeout_sec", cfg.TileTimeout.Seconds(), "worker_memory_bytes", cfg.WorkerMemoryBytes, "worker_threads", cfg.WorkerThreads)
 	manager, err := catalog.New(catalog.Options{
 		CatalogURL:  cfg.CatalogURL,
 		CatalogHost: cfg.CatalogHost,

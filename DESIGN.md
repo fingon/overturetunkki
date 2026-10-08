@@ -319,8 +319,17 @@ geometry encoding, H3 semantics version, and writer-format revision.
 
 ## DuckDB query and bounded output
 
-Read only pinned places assets through DuckDB `httpfs`; use projection and bbox
-predicate pushdown. Convert geometry to the pinned DuckDB geometry type and
+Validate the complete pinned manifest, then select only places assets whose
+catalog bboxes intersect the conservative H3 cell bounds. Selection retains
+boundary-touching and antimeridian intersections, and all assets for global
+bounds. Read the selected assets through DuckDB `httpfs`; retain projection
+and row-level bbox predicate pushdown. Split ordinary, wrapped-longitude,
+invalid-latitude, and invalid-longitude bboxes into disjoint `UNION ALL`
+branches. This keeps ordinary overlap comparisons available to Parquet row-group
+pruning while retaining malformed/null bboxes for exact H3 evaluation. Invalid
+latitude takes precedence over invalid longitude, so a row with both cannot be
+returned twice. Apply one outer row limit across all branches.
+Convert geometry to the pinned DuckDB geometry type and
 apply exact H3 membership. Materialize at most `max_tile_rows + 1` matching rows
 in bounded worker scratch. `internal/worker` now builds this statement only
 from the validated catalog manifest and projection, binds all URLs and scalar
@@ -330,7 +339,19 @@ immediately without sorting or serializing the whole cell; otherwise COPY that
 table as one complete zstd GeoParquet file. This row limit is an explicit
 additional admission limit, not an estimate of compressed bytes. LIMIT avoids
 full result materialization but does not guarantee cheap S3 scans or early
-completion.
+completion. If no catalog asset intersects, read only the first validated
+asset's schema with `WHERE FALSE` and produce the same typed empty GeoParquet
+output, including nested fields. This path may read remote metadata but does
+not scan source rows.
+
+Supervisor logs include effective worker limits, manifest/selected asset counts,
+selected asset bytes (object sizes, not measured transfer), elapsed milliseconds,
+and worker planning/materialization/COPY/validation timings. Returned worker
+failures include their phase; process interruption before a protocol response
+is labeled `process`. Caller cancellation is logged at warning level and maps
+to the existing retryable `504 tile_timeout` response rather than an internal
+server error. When all callers detach, the existing scheduler cancels the job;
+one canceled caller does not cancel a job still needed by another caller.
 
 For admitted rows, use DuckDB `COPY (SELECT <projection> FROM candidate)` to a
 single staging file with `FORMAT PARQUET, COMPRESSION ZSTD`. Do not split output
@@ -384,7 +405,18 @@ worker hard-limit prototype fails, resolve it before implementing serving; do
 not replace it with an unbounded COPY followed only by stat.
 
 Deterministic worker benchmarks cover dense-city and sparse-region query
-planning without contacting S3. Any live upstream benchmark must report the
+planning without contacting S3. Bbox correctness tests read Parquet fixtures
+and compare against unpruned exact membership, including null/invalid bboxes.
+The HTTPS container fixture serves distinct partitions with range requests,
+records asset requests/transfer bytes, and compares pruned output IDs against
+an unpruned catalog. Verbose mode profiles the candidate materialization with
+`EXPLAIN ANALYZE`, preserving the same bounded query and recording actual scan
+projections, HTTPFS request/transfer statistics, and operator timings. The
+[live Helsinki measurements](testdata/performance/2026-09-23.1-helsinki/README.md)
+confirm selected-field projection and successful 300-second-deadline completion.
+The disjoint branches reduce measured latency and GET count while increasing
+transfer; malformed-bbox fallback scans remain a cold-tile limitation.
+Any live upstream benchmark must report the
 manifest asset bytes, rows examined, S3 transfer, query latency, COPY latency,
 and whether rejection was caused by rows or compressed bytes. Neither the
 deterministic benchmark nor a live result promises constant-time rejection or
@@ -496,7 +528,7 @@ These defaults are starting points to validate with representative POIs.
 | `--negative-cache-entries` | `10000` | Maximum retained size rejections. |
 | `--negative-cache-ttl` | `5m` | Rejection lifetime. |
 | `--write-timeout` | `30s` | Maximum response transmission time. |
-| `-v`, `--verbose` | `false` | Set default slog level to debug. |
+| `-v`, `--verbose` | `false` | Set default slog level to debug and record executed tile scan profiles. |
 
 Reject nonpositive limits, unsupported fields, an unwritable cache, and
 `cache_max_bytes < max_tile_bytes`. Require `id` and `geometry`, reject duplicate
@@ -519,7 +551,16 @@ container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
 in Linux and loads its image tarballs. No Docker daemon is required.
 On macOS, build/test/vet select the CGO H3 client; the service remains Linux-only.
 GitHub Actions tests amd64 and arm64 on Linux and gates
-Linux images with smoke and lifecycle tests. Successful pushes to the default
+Linux images with smoke and lifecycle tests. CI caches host Go modules and
+build results using both module checksum files, prek hook environments, and
+golangci-lint results. Podman builds use a cached host directory mounted at
+`/go`; `GO_CACHE_VOLUME` defaults to the local `overturetunkki-go` named volume
+and can be overridden with an absolute directory created before building.
+Caches are separated by runner OS/architecture and compatible toolchain and
+configuration inputs. Lint and Podman build cache keys include source inputs,
+with compatible restore prefixes to reuse work after source changes. Cache
+hits still run every check and build; successful jobs save new caches.
+Successful pushes to the default
 branch build native amd64 and arm64 service images and publish their manifest
 as `ghcr.io/fingon/overturetunkki/service:latest`. `image` and `smoke`
 exercise the bundled native dependency probe. `service-image` packages the same bundled

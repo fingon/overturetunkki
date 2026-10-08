@@ -150,6 +150,9 @@ func TestBuildCandidateQueryRejectsUntrustedManifest(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			snapshot := testSnapshot()
 			test.mutate(&snapshot)
+			for index := range snapshot.Manifest {
+				snapshot.Manifest[index].BBox = [4]float64{10, 10, 11, 11}
+			}
 			plan, err := BuildQueryPlan(TileRequest{Cell: testCell(t).String()}, []string{"id", "geometry"}, snapshot.Schema)
 			assert.NilError(t, err)
 			if err != nil {
@@ -197,6 +200,35 @@ func TestMaterializeCandidatesUsesOnlyTheConfiguredRowAllowance(t *testing.T) {
 	err = connection.QueryRowContext(context.Background(), "SELECT count(*) FROM "+candidateTableName).Scan(&count)
 	assert.NilError(t, err)
 	assert.Equal(t, count, int64(2))
+}
+
+func TestMaterializeCandidatesProfilesSelectedParquetColumns(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("profile=%t", enabled), func(t *testing.T) {
+			connection := openDuckDBConnection(t)
+			filePath := filepath.Join(t.TempDir(), "source.parquet")
+			_, err := connection.ExecContext(t.Context(), "COPY (SELECT i AS id, 'chosen' AS name, repeat('x', 1000) AS unused_column FROM range(3) AS source(i)) TO ? (FORMAT PARQUET)", filePath)
+			assert.NilError(t, err)
+			diagnostics := TileDiagnostics{}
+			query := PreparedQuery{
+				SQL:  "SELECT id, name FROM read_parquet(?) WHERE id >= ? LIMIT ?",
+				Args: []any{filePath, int64(1), int64(2)},
+			}
+			if enabled {
+				query.Profile = &diagnostics
+			}
+			rows, err := materializeCandidates(t.Context(), connection, query, 2)
+			assert.NilError(t, err)
+			t.Cleanup(func() { assert.NilError(t, rows.drop(context.Background(), connection)) })
+			assert.Equal(t, rows.rowCount, int64(2))
+			if enabled {
+				assert.Assert(t, strings.Contains(diagnostics.MaterializeProfile, "Projections:"), diagnostics.MaterializeProfile)
+				assert.Assert(t, !strings.Contains(diagnostics.MaterializeProfile, "unused_column"), diagnostics.MaterializeProfile)
+			} else {
+				assert.Equal(t, diagnostics.MaterializeProfile, "")
+			}
+		})
+	}
 }
 
 func TestMaterializeCandidatesPreservesEmptyNullAndNestedValues(t *testing.T) {
@@ -354,6 +386,7 @@ func testSnapshot() catalog.Snapshot {
 		Manifest: []catalog.Asset{
 			{
 				PartitionID:   "00000",
+				BBox:          [4]float64{-180, -90, 180, 90},
 				Href:          fmt.Sprintf("https://%s/release/2026-09-23.1/theme=places/type=place/part-00000-a%s", catalog.DefaultAssetHost, assetPathSuffix),
 				RowCount:      10,
 				RowGroupCount: 1,
@@ -361,6 +394,7 @@ func testSnapshot() catalog.Snapshot {
 			},
 			{
 				PartitionID:   "00001",
+				BBox:          [4]float64{-180, -90, 180, 90},
 				Href:          fmt.Sprintf("https://%s/release/2026-09-23.1/theme=places/type=place/part-00001-b%s", catalog.DefaultAssetHost, assetPathSuffix),
 				RowCount:      20,
 				RowGroupCount: 2,
