@@ -23,6 +23,7 @@ func TestParseDefaults(t *testing.T) {
 	assert.Equal(t, cfg.CatalogPollInterval, DefaultCatalogPollInterval)
 	assert.Equal(t, cfg.CatalogTimeout, DefaultCatalogTimeout)
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names", "basic_category"})
+	assert.Equal(t, cfg.MinTileResolution, DefaultMinTileResolution)
 	assert.Equal(t, cfg.MaxTileBytes, DefaultMaxTileBytes)
 	assert.Equal(t, cfg.MaxTileRows, DefaultMaxTileRows)
 	assert.Equal(t, cfg.CacheDir, DefaultCacheDir)
@@ -182,4 +183,35 @@ func TestValidateCacheDirectory(t *testing.T) {
 	}
 	assert.NilError(t, file.Close())
 	assert.ErrorContains(t, ValidateCacheDirectory(filePath), "create cache directory")
+}
+
+func TestMinimumTileResolutionConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name, environment string
+		args              []string
+		want              int
+		wantError         bool
+	}{
+		{name: "default", want: DefaultMinTileResolution},
+		{name: "environment", environment: "4", want: 4},
+		{name: "flag wins", environment: "4", args: []string{"--min-tile-resolution=3"}, want: 3},
+		{name: "allow all", environment: "0", want: 0},
+		{name: "finest only", environment: "15", want: 15},
+		{name: "negative", environment: "-1", wantError: true},
+		{name: "too fine", environment: "16", wantError: true},
+		{name: "invalid value", environment: "not-a-resolution", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.environment != "" {
+				t.Setenv("OVERTURE_MIN_TILE_RESOLUTION", test.environment)
+			}
+			cfg, err := Parse(test.args)
+			if test.wantError {
+				assert.Assert(t, err != nil)
+				return
+			}
+			assert.NilError(t, err)
+			assert.Equal(t, cfg.MinTileResolution, test.want)
+		})
+	}
 }

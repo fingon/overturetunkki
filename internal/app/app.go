@@ -40,7 +40,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	if err := ctx.Err(); err != nil {
 		return waitForShutdown(ctx, config.ModeSupervisor)
 	}
-	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount, "tile_timeout_sec", cfg.TileTimeout.Seconds(), "worker_memory_bytes", cfg.WorkerMemoryBytes, "worker_threads", cfg.WorkerThreads)
+	slog.Info("supervisor mode started", "listen", cfg.Listen, "worker_count", cfg.WorkerCount, "tile_timeout_sec", cfg.TileTimeout.Seconds(), "min_tile_resolution", cfg.MinTileResolution, "worker_memory_bytes", cfg.WorkerMemoryBytes, "worker_threads", cfg.WorkerThreads)
 	manager, err := catalog.New(catalog.Options{
 		CatalogURL:  cfg.CatalogURL,
 		CatalogHost: cfg.CatalogHost,
@@ -95,14 +95,15 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("create tile provider: %w", err)
 	}
 	apiServer, err := httpapi.New(httpapi.Options{
-		Observer:        observer,
-		Provider:        provider,
-		Fields:          cfg.Fields,
-		MaxTileBytes:    cfg.MaxTileBytes,
-		MaxTileRows:     cfg.MaxTileRows,
-		TileConcurrency: workerCount,
-		WriteTimeout:    cfg.WriteTimeout,
-		AttributionURL:  []string{"https://overturemaps.org"},
+		Observer:          observer,
+		Provider:          provider,
+		Fields:            cfg.Fields,
+		MaxTileBytes:      cfg.MaxTileBytes,
+		MinTileResolution: cfg.MinTileResolution,
+		MaxTileRows:       cfg.MaxTileRows,
+		TileConcurrency:   workerCount,
+		WriteTimeout:      cfg.WriteTimeout,
+		AttributionURL:    []string{"https://overturemaps.org"},
 	})
 	if err != nil {
 		if closeErr := provider.Close(); closeErr != nil {

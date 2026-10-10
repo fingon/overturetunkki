@@ -73,14 +73,15 @@ type TileReader interface {
 }
 
 type Options struct {
-	Observer        CatalogObserver
-	Provider        TileProvider
-	Fields          []string
-	MaxTileBytes    int64
-	MaxTileRows     int64
-	AttributionURL  []string
-	TileConcurrency int
-	WriteTimeout    time.Duration
+	Observer          CatalogObserver
+	Provider          TileProvider
+	Fields            []string
+	MaxTileBytes      int64
+	MinTileResolution int
+	MaxTileRows       int64
+	AttributionURL    []string
+	TileConcurrency   int
+	WriteTimeout      time.Duration
 }
 
 type Server struct {
@@ -95,10 +96,16 @@ type Server struct {
 	error5xx        atomic.Uint64
 	capacityRejects atomic.Uint64
 	requestSequence atomic.Uint64
-	tileAdmissions  chan struct{}
+	tileAdmissions  map[tileAdmissionKey]int
 	stateMu         sync.Mutex
 	activeRequests  sync.WaitGroup
 	shuttingDown    bool
+}
+
+type tileAdmissionKey struct {
+	catalogVersion string
+	projectionID   string
+	cell           h3.Cell
 }
 
 type trackingResponseWriter struct {
@@ -145,6 +152,9 @@ func New(options Options) (*Server, error) {
 	if options.MaxTileBytes <= 0 || options.MaxTileRows <= 0 {
 		return nil, errors.New("HTTP server tile limits must be positive")
 	}
+	if options.MinTileResolution < 0 || options.MinTileResolution > h3.MaxResolution {
+		return nil, errors.New("minimum tile resolution must be between 0 and 15")
+	}
 	if options.TileConcurrency < 0 {
 		return nil, errors.New("HTTP server tile concurrency must not be negative")
 	}
@@ -166,7 +176,7 @@ func New(options Options) (*Server, error) {
 		provider:       options.Provider,
 		fields:         fields,
 		options:        options,
-		tileAdmissions: make(chan struct{}, options.TileConcurrency),
+		tileAdmissions: make(map[tileAdmissionKey]int),
 	}, nil
 }
 
@@ -287,23 +297,27 @@ func (server *Server) finishRequest(writer *trackingResponseWriter, request *htt
 	}
 }
 
-func (server *Server) acquireTile() error {
+func (server *Server) acquireTile(key tileAdmissionKey) error {
 	server.stateMu.Lock()
 	defer server.stateMu.Unlock()
 	if server.shuttingDown {
 		return ErrServerShuttingDown
 	}
-	select {
-	case server.tileAdmissions <- struct{}{}:
-		return nil
-	default:
+	if server.tileAdmissions[key] == 0 && len(server.tileAdmissions) >= server.options.TileConcurrency {
 		server.capacityRejects.Add(1)
 		return cache.ErrCapacityUnavailable
 	}
+	server.tileAdmissions[key]++
+	return nil
 }
 
-func (server *Server) releaseTile() {
-	<-server.tileAdmissions
+func (server *Server) releaseTile(key tileAdmissionKey) {
+	server.stateMu.Lock()
+	defer server.stateMu.Unlock()
+	server.tileAdmissions[key]--
+	if server.tileAdmissions[key] == 0 {
+		delete(server.tileAdmissions, key)
+	}
 }
 
 func (server *Server) Shutdown(ctx context.Context) error {
@@ -349,7 +363,7 @@ func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *
 		Fields:                 append([]string(nil), server.fields...),
 		MaxTileBytes:           server.options.MaxTileBytes,
 		MaxTileRows:            server.options.MaxTileRows,
-		SupportedH3Resolutions: supportedH3Resolutions(),
+		SupportedH3Resolutions: supportedH3Resolutions(server.options.MinTileResolution),
 		Attribution:            append([]string(nil), server.options.AttributionURL...),
 	})
 }
@@ -370,6 +384,12 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: "H3 cell is invalid"})
 		return
 	}
+	if cell.Resolution() < server.options.MinTileResolution {
+		err := &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: server.options.MinTileResolution}
+		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
+		writeError(responseWriter, status, response)
+		return
+	}
 	snapshot, err := server.refresh(request.Context())
 	if err != nil {
 		slog.Error("refresh catalog for tile request", "request_id", request.Header.Get(requestIDHeader), "error", err)
@@ -380,7 +400,8 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog version is stale", Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion})
 		return
 	}
-	if err := server.acquireTile(); err != nil {
+	admissionKey := tileAdmissionKey{catalogVersion: snapshot.CatalogVersion, projectionID: snapshot.ProjectionID, cell: cell}
+	if err := server.acquireTile(admissionKey); err != nil {
 		if errors.Is(err, ErrServerShuttingDown) {
 			writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: serverShuttingDownCode, Message: serverShuttingDownMessage, Retryable: true})
 			return
@@ -388,7 +409,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: capacityUnavailableCode, Message: capacityUnavailableMessage, Retryable: true})
 		return
 	}
-	defer server.releaseTile()
+	defer server.releaseTile(admissionKey)
 	tile, err := server.provider.Get(request.Context(), snapshot, cell)
 	if err != nil {
 		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
@@ -568,6 +589,12 @@ func requiredQueryValue(request *http.Request, name string) (string, error) {
 }
 
 func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorResponse) {
+	if tooCoarse, ok := errors.AsType[*worker.ResolutionTooCoarseError](err); ok {
+		response := sizeErrorResponse(cell, maxTileBytes, "resolution", tooCoarse.Error())
+		minimum := tooCoarse.MinResolution
+		response.SuggestedResolution = &minimum
+		return http.StatusUnprocessableEntity, response
+	}
 	switch {
 	case errors.Is(err, worker.ErrOutputTooLarge):
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "compressed_bytes", "tile exceeds the compressed byte limit")
@@ -613,10 +640,10 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
-func supportedH3Resolutions() []int {
-	resolutions := make([]int, h3.MaxResolution+1)
-	for resolution := range resolutions {
-		resolutions[resolution] = resolution
+func supportedH3Resolutions(minimum int) []int {
+	resolutions := make([]int, h3.MaxResolution-minimum+1)
+	for index := range resolutions {
+		resolutions[index] = minimum + index
 	}
 	return resolutions
 }

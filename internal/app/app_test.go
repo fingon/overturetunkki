@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/fingon/overturetunkki/internal/cache"
+	"github.com/fingon/overturetunkki/internal/catalog"
 	"github.com/fingon/overturetunkki/internal/config"
 	"github.com/fingon/overturetunkki/internal/worker"
+	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
 
@@ -64,9 +66,9 @@ func TestTileProviderRemembersOutputSizeRejectionWithoutByteCounts(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			key := cache.Key{
 				CatalogVersion: "release",
-				ProjectionID:   "projection",
+				ProjectionID:   testSourceProjectionID,
 				Cell:           test.name,
-				SizePolicyID:   "policy",
+				SizePolicyID:   testSourcePolicyID,
 			}
 			assert.NilError(t, provider.rememberSizeRejection(key, test.err))
 			rejection, ok, getErr := negative.Get(key)
@@ -93,4 +95,22 @@ func TestEncodeTileWorkerErrorIncludesOutputLimit(t *testing.T) {
 		assert.Equal(t, outputTooLarge.ActualBytes, int64(101))
 		assert.Equal(t, outputTooLarge.LimitBytes, int64(100))
 	}
+}
+
+func TestTileProviderRejectsCoarseTilesBeforeCache(t *testing.T) {
+	provider := &tileProvider{minResolution: config.DefaultMinTileResolution}
+	for resolution := range config.DefaultMinTileResolution {
+		cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, resolution)
+		assert.NilError(t, err)
+		_, err = provider.Get(t.Context(), catalog.Snapshot{}, cell)
+		assert.Assert(t, errors.Is(err, worker.ErrResolutionTooCoarse))
+		tooCoarse, ok := errors.AsType[*worker.ResolutionTooCoarseError](err)
+		assert.Assert(t, ok)
+		assert.Equal(t, tooCoarse.MinResolution, config.DefaultMinTileResolution)
+	}
+	cfg, err := config.Parse(nil)
+	assert.NilError(t, err)
+	original := sizePolicyID(cfg)
+	cfg.MinTileResolution++
+	assert.Assert(t, sizePolicyID(cfg) != original)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -26,6 +27,7 @@ type Scheduler struct {
 
 type job struct {
 	key      string
+	tileKey  Key
 	maxBytes int64
 	build    JobFunc
 	context  context.Context
@@ -72,6 +74,9 @@ func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, bui
 	if err != nil {
 		return fmt.Errorf("run cache job: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("run cache job: %w", err)
+	}
 	scheduler.mu.Lock()
 	if scheduler.closed {
 		scheduler.mu.Unlock()
@@ -82,6 +87,7 @@ func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, bui
 		jobContext, cancel := context.WithCancel(context.Background())
 		current = &job{
 			key:      keyDigest,
+			tileKey:  key,
 			maxBytes: maxBytes,
 			build:    build,
 			context:  jobContext,
@@ -139,9 +145,9 @@ func (scheduler *Scheduler) detach(current *job) {
 	if current.waiters > 0 {
 		current.waiters--
 	}
-	if current.waiters == 0 {
+	if current.waiters == 0 && !current.started {
 		current.cancel()
-		if !current.started && scheduler.jobs[current.key] == current {
+		if scheduler.jobs[current.key] == current {
 			delete(scheduler.jobs, current.key)
 		}
 	}
@@ -161,21 +167,28 @@ func (scheduler *Scheduler) worker() {
 		scheduler.mu.Unlock()
 
 		reservation, err := scheduler.cache.Reserve(current.context, current.maxBytes)
-		if err == nil && current.context.Err() == nil {
-			err = current.build(current.context, reservation)
-		}
-		if reservation != nil {
-			releaseErr := reservation.Release()
-			if err == nil && releaseErr != nil {
-				err = releaseErr
+		if err == nil {
+			err = current.context.Err()
+			if err == nil {
+				err = current.build(current.context, reservation)
 			}
 		}
+		if reservation != nil {
+			if releaseErr := reservation.Release(); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release cache job reservation: %w", releaseErr))
+			}
+		}
+		current.cancel()
 		scheduler.mu.Lock()
+		abandoned := current.waiters == 0
 		current.err = err
 		if scheduler.jobs[current.key] == current {
 			delete(scheduler.jobs, current.key)
 		}
 		close(current.done)
 		scheduler.mu.Unlock()
+		if abandoned && err != nil {
+			slog.Error("detached cache job failed", "cell", current.tileKey.Cell, "catalog_version", current.tileKey.CatalogVersion, "projection_id", current.tileKey.ProjectionID, "size_policy_id", current.tileKey.SizePolicyID, "error", err)
+		}
 	}
 }

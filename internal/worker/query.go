@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/fingon/overturetunkki/internal/catalog"
@@ -26,10 +27,24 @@ const (
 )
 
 var (
-	ErrInvalidCell       = errors.New("invalid H3 cell")
-	ErrInvalidProjection = errors.New("invalid source projection")
-	ErrTooManyRows       = errors.New("candidate rows exceed row limit")
+	ErrInvalidCell         = errors.New("invalid H3 cell")
+	ErrInvalidProjection   = errors.New("invalid source projection")
+	ErrResolutionTooCoarse = errors.New("tile resolution is below the minimum")
+	ErrTooManyRows         = errors.New("candidate rows exceed row limit")
 )
+
+type ResolutionTooCoarseError struct {
+	ActualResolution int
+	MinResolution    int
+}
+
+func (err *ResolutionTooCoarseError) Error() string {
+	return fmt.Sprintf("tile resolution %d is below minimum resolution %d", err.ActualResolution, err.MinResolution)
+}
+
+func (*ResolutionTooCoarseError) Unwrap() error {
+	return ErrResolutionTooCoarse
+}
 
 type TileRequest struct {
 	Cell string
@@ -59,6 +74,7 @@ type TileBuildRequest struct {
 	OutputPath  string
 	MaxBytes    int64
 	Diagnostics *TileDiagnostics
+	SourcePaths []string
 }
 
 type candidateCopyRequest struct {
@@ -144,6 +160,45 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 	}, nil
 }
 
+func BuildCachedCandidateQuery(plan QueryPlan, sourcePaths []string, maxRows int64) (PreparedQuery, error) {
+	if !plan.Cell.IsValid() || len(plan.Columns) == 0 {
+		return PreparedQuery{}, errors.New("build cached candidate query: invalid query plan")
+	}
+	if len(sourcePaths) == 0 || len(sourcePaths) > h3filter.MaxCoveringCells {
+		return PreparedQuery{}, errors.New("build cached candidate query: invalid source count")
+	}
+	rowLimit, err := CandidateRowLimit(maxRows)
+	if err != nil {
+		return PreparedQuery{}, fmt.Errorf("build cached candidate query: %w", err)
+	}
+	placeholders := make([]string, len(sourcePaths))
+	args := make([]any, 0, len(sourcePaths)+2)
+	seen := make(map[string]struct{}, len(sourcePaths))
+	for index, sourcePath := range sourcePaths {
+		if !filepath.IsAbs(sourcePath) || filepath.Ext(sourcePath) != ".parquet" || strings.ContainsAny(sourcePath, "*?[") {
+			return PreparedQuery{}, fmt.Errorf("build cached candidate query: source is not an absolute parquet file: %q", sourcePath)
+		}
+		if _, exists := seen[sourcePath]; exists {
+			return PreparedQuery{}, errors.New("build cached candidate query: duplicate source file")
+		}
+		seen[sourcePath] = struct{}{}
+		placeholders[index] = "?"
+		args = append(args, sourcePath)
+	}
+	args = append(args, plan.CellValue, rowLimit)
+	return PreparedQuery{
+		SQL:  fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE %s LIMIT ?", candidateProjectionSQL(plan.Columns), strings.Join(placeholders, ", "), exactMembershipSQL()),
+		Args: args,
+	}, nil
+}
+
+func PrepareTileQuery(plan QueryPlan, snapshot catalog.Snapshot, sourcePaths []string, maxRows int64) (PreparedQuery, error) {
+	if len(sourcePaths) > 0 {
+		return BuildCachedCandidateQuery(plan, sourcePaths, maxRows)
+	}
+	return BuildCandidateQuery(plan, snapshot, maxRows)
+}
+
 func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error) {
 	if ctx == nil {
 		return CopyResult{}, errors.New("build tile: context is nil")
@@ -152,7 +207,7 @@ func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error
 		return CopyResult{}, errors.New("build tile: DuckDB connection is nil")
 	}
 	finishPlanning := request.Diagnostics.start(tileStagePlanning)
-	query, err := BuildCandidateQuery(request.Plan, request.Snapshot, request.MaxRows)
+	query, err := PrepareTileQuery(request.Plan, request.Snapshot, request.SourcePaths, request.MaxRows)
 	finishPlanning()
 	if err != nil {
 		return CopyResult{}, err

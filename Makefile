@@ -34,8 +34,8 @@ test: test-$(HOST_OS) test-tools
 test-tools:
 	cd build/tools && $(GO) test ./...
 
-test-linux:
-	$(GO) test ./...
+test-linux: fetch-extensions
+	OVERTURE_DUCKDB_EXTENSION_DIRECTORY=$(abspath cmd/overturetunkki/kodata/extensions) $(GO) test ./...
 
 test-darwin: test-client
 

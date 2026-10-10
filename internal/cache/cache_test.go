@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -444,6 +445,7 @@ func TestSchedulerCoalescesSameKeyAndCleansReservation(t *testing.T) {
 	go func() {
 		secondDone <- scheduler.Do(context.Background(), key, 10, func(context.Context, *Reservation) error { return nil })
 	}()
+	waitForSchedulerWaiters(t, scheduler, key, 2)
 	close(release)
 	assert.NilError(t, <-firstDone)
 	assert.NilError(t, <-secondDone)
@@ -497,39 +499,172 @@ func TestSchedulerRunsDifferentKeysInParallel(t *testing.T) {
 	assert.NilError(t, cache.Close())
 }
 
-func TestSchedulerCallerDetachmentCancelsUnobservedBuild(t *testing.T) {
-	cache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
-	assert.NilError(t, err)
-	if err != nil {
-		return
+func TestSchedulerDetachedRunningBuildPublishes(t *testing.T) {
+	for _, reattach := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reattach=%t", reattach), func(t *testing.T) {
+			tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
+			assert.NilError(t, err)
+			scheduler, err := NewScheduler(tileCache, SchedulerOptions{Workers: 1, QueueCapacity: 1})
+			assert.NilError(t, err)
+			defer func() { assert.NilError(t, scheduler.Close()); assert.NilError(t, tileCache.Close()) }()
+			callerContext, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			started := make(chan struct{})
+			release := make(chan struct{})
+			published := make(chan struct{})
+			var calls atomic.Int32
+			key := testKey()
+			build := func(ctx context.Context, reservation *Reservation) error {
+				calls.Add(1)
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				staging, createErr := tileCache.CreateStaging(key)
+				if createErr != nil {
+					return createErr
+				}
+				if closeErr := staging.Close(); closeErr != nil {
+					return closeErr
+				}
+				if writeErr := os.WriteFile(staging.Name(), []byte("tile"), 0o600); writeErr != nil {
+					return writeErr
+				}
+				if _, publishErr := reservation.Publish(key, staging.Name(), key.CatalogVersion); publishErr != nil {
+					return publishErr
+				}
+				close(published)
+				return nil
+			}
+			first := make(chan error, 1)
+			go func() { first <- scheduler.Do(callerContext, key, 10, build) }()
+			<-started
+			cancel()
+			assert.Assert(t, errors.Is(<-first, context.Canceled))
+			scheduler.mu.Lock()
+			current := scheduler.jobs[mustKeyDigest(t, key)]
+			assert.Assert(t, current != nil)
+			assert.NilError(t, current.context.Err())
+			scheduler.mu.Unlock()
+			var second chan error
+			if reattach {
+				second = make(chan error, 1)
+				go func() {
+					second <- scheduler.Do(t.Context(), key, 10, func(context.Context, *Reservation) error { return errors.New("duplicate build") })
+				}()
+				waitForSchedulerWaiters(t, scheduler, key, 1)
+			}
+			close(release)
+			select {
+			case <-published:
+			case <-time.After(time.Second):
+				t.Fatal("detached build did not publish")
+			}
+			if reattach {
+				assert.NilError(t, <-second)
+			}
+			reader, err := tileCache.Open(key)
+			assert.NilError(t, err)
+			data, err := io.ReadAll(reader)
+			assert.NilError(t, err)
+			assert.Equal(t, string(data), "tile")
+			assert.NilError(t, reader.Close())
+			assert.Equal(t, calls.Load(), int32(1))
+			waitForCacheStats(t, tileCache, Stats{UsedBytes: 4, UsedEntries: 1})
+		})
 	}
-	scheduler, err := NewScheduler(cache, SchedulerOptions{Workers: 1, QueueCapacity: 1})
-	assert.NilError(t, err)
-	if err != nil {
-		return
-	}
-	defer func() {
-		assert.NilError(t, scheduler.Close())
-		assert.NilError(t, cache.Close())
-	}()
+}
 
-	callerContext, cancel := context.WithCancel(context.Background())
+func mustKeyDigest(t *testing.T, key Key) string {
+	t.Helper()
+	digest, err := key.digest()
+	assert.NilError(t, err)
+	return digest
+}
+
+func waitForSchedulerWaiters(t *testing.T, scheduler *Scheduler, key Key, expected int) {
+	t.Helper()
+	digest := mustKeyDigest(t, key)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		scheduler.mu.Lock()
+		current := scheduler.jobs[digest]
+		matches := current != nil && current.waiters == expected
+		scheduler.mu.Unlock()
+		if matches {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("callers did not attach to the shared job")
+}
+
+func TestSchedulerCanceledQueuedJobCanBeRetried(t *testing.T) {
+	tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
+	assert.NilError(t, err)
+	scheduler, err := NewScheduler(tileCache, SchedulerOptions{Workers: 1, QueueCapacity: 2})
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, scheduler.Close()); assert.NilError(t, tileCache.Close()) }()
 	started := make(chan struct{})
-	canceled := make(chan struct{})
+	release := make(chan struct{})
+	first := make(chan error, 1)
+	key := testKey()
+	go func() {
+		first <- scheduler.Do(t.Context(), key, 10, func(context.Context, *Reservation) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	queuedKey := key
+	queuedKey.Cell = "queued"
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	queued := make(chan error, 1)
+	var calls atomic.Int32
+	build := func(context.Context, *Reservation) error { calls.Add(1); return nil }
+	go func() { queued <- scheduler.Do(ctx, queuedKey, 10, build) }()
+	waitForSchedulerWaiters(t, scheduler, queuedKey, 1)
+	cancel()
+	assert.Assert(t, errors.Is(<-queued, context.Canceled))
+	close(release)
+	assert.NilError(t, <-first)
+	assert.NilError(t, scheduler.Do(t.Context(), queuedKey, 10, build))
+	assert.Equal(t, calls.Load(), int32(1))
+	assert.DeepEqual(t, tileCache.Stats(), Stats{})
+}
+
+func TestSchedulerRejectsCanceledCallerAndCancelsOnClose(t *testing.T) {
+	tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4})
+	assert.NilError(t, err)
+	scheduler, err := NewScheduler(tileCache, SchedulerOptions{Workers: 1, QueueCapacity: 1})
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, scheduler.Close()); assert.NilError(t, tileCache.Close()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var calls atomic.Int32
+	err = scheduler.Do(ctx, testKey(), 10, func(context.Context, *Reservation) error { calls.Add(1); return nil })
+	assert.Assert(t, errors.Is(err, context.Canceled))
+	assert.Equal(t, calls.Load(), int32(0))
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- scheduler.Do(callerContext, testKey(), 10, func(ctx context.Context, _ *Reservation) error {
+		done <- scheduler.Do(ctx, testKey(), 10, func(ctx context.Context, _ *Reservation) error {
 			close(started)
 			<-ctx.Done()
-			close(canceled)
 			return ctx.Err()
 		})
 	}()
 	<-started
 	cancel()
 	assert.Assert(t, errors.Is(<-done, context.Canceled))
-	<-canceled
-	waitForCacheStats(t, cache, Stats{})
+	assert.NilError(t, scheduler.Close())
+	assert.DeepEqual(t, tileCache.Stats(), Stats{})
 }
 
 func TestSchedulerRejectsFullQueueAndClosedState(t *testing.T) {

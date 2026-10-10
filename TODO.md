@@ -74,8 +74,18 @@ items below are completed;
 - [x] Implement bounded scratch with deployment quotas and separate bounded
   TTL negative-cache entries for proven size rejections only.
 - [x] Test quota boundaries, all-pinned capacity failures, parallel admissions,
-  cancellation of the last waiter, generation changes, disk-full errors,
+  last-waiter detachment, detached publication, queued cancellation, generation
+  changes, disk-full errors,
   interrupted publication, orphan cleanup, corruption, and restart accounting.
+
+- [x] Count distinct tiles for HTTP admission, recheck caches after scheduling,
+  and retain running builds for later callers after the last caller detaches.
+- [x] Derive smaller tiles from complete compatible cached coverage at one
+  coarser resolution, with boundary neighbors, bounded source count, pinned
+  readers, upstream fallback, and the existing output limits and validation.
+- [x] Configure minimum H3 resolution through flag/environment (default 2),
+  reject coarser tiles before freshness/cache/build work, advertise the allowed
+  range, and test configuration and fast rejection.
 
 ## 6. HTTP and operations
 

@@ -48,6 +48,7 @@ type RuntimeTileRequest struct {
 	OutputPath  string
 	Settings    RuntimeSettings
 	Diagnostics *TileDiagnostics
+	SourcePaths []string
 }
 
 func (settings RuntimeSettings) Validate() error {
@@ -130,6 +131,7 @@ func BuildTileWithSettings(ctx context.Context, request RuntimeTileRequest) (Til
 		OutputPath:  request.OutputPath,
 		MaxBytes:    request.Settings.MaxOutputBytes,
 		Diagnostics: request.Diagnostics,
+		SourcePaths: request.SourcePaths,
 	})
 	if err != nil {
 		return TileResult{}, classifyWorkerError(err)

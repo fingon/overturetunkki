@@ -80,6 +80,7 @@ protocol and is not a standalone HTTP service.
 | `--fields` | `OVERTURE_FIELDS` | `id,geometry,names,basic_category` |
 | `--max-tile-bytes` | `OVERTURE_MAX_TILE_BYTES` | `8388608` (8 MiB) |
 | `--max-tile-rows` | `OVERTURE_MAX_TILE_ROWS` | `100000` |
+| `--min-tile-resolution` | `OVERTURE_MIN_TILE_RESOLUTION` | `2` |
 | `--cache-dir` | `OVERTURE_CACHE_DIR` | `/var/cache/overture` |
 | `--cache-max-bytes` | `OVERTURE_CACHE_MAX_BYTES` | `10737418240` (10 GiB) |
 | `--cache-max-entries` | `OVERTURE_CACHE_MAX_ENTRIES` | `100000` |
@@ -115,6 +116,17 @@ returns `409 catalog_changed` where appropriate; an unavailable check returns
 `tile-timeout`, and complete HTTP responses have the `write-timeout` deadline.
 Successful tile responses use `Cache-Control: no-cache, must-revalidate` and
 304 responses are evaluated only after freshness validation.
+
+Requests for the same tile share one build. Running builds finish caching even
+if every client disconnects; abandoned queued jobs are discarded. Smaller tiles
+can be derived locally when a complete covering set of compatible larger tiles
+is cached, including boundary neighbors; otherwise the service queries upstream.
+
+`OVERTURE_MIN_TILE_RESOLUTION` (or `--min-tile-resolution`) defaults to `2`,
+roughly 300–365 km across using average H3 edge lengths. Requests at lower
+resolutions immediately return `422 tile_too_large` without checking the catalog
+or building a tile. The catalog advertises allowed resolutions. Set the minimum
+to `0` to allow all H3 resolutions, or raise it to restrict requests further.
 
 The catalog response includes Overture's attribution URL
 (`https://overturemaps.org`) along with the release, catalog version,

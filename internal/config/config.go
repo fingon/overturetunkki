@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/uber/h3-go/v4"
 )
 
 type Mode string
@@ -24,6 +25,7 @@ const (
 	DefaultCatalogURL                 = "https://stac.overturemaps.org/catalog.json"
 	DefaultCatalogPollInterval        = time.Minute
 	DefaultCatalogTimeout             = 10 * time.Second
+	DefaultMinTileResolution          = 2
 	DefaultMaxTileBytes         int64 = 8 * 1024 * 1024
 	DefaultMaxTileRows          int64 = 100_000
 	DefaultCacheDir                   = "/var/cache/overture"
@@ -50,6 +52,7 @@ type Config struct {
 	CatalogPollInterval  time.Duration `default:"1m" env:"OVERTURE_CATALOG_POLL_INTERVAL" help:"Additional idle catalog refresh interval." name:"catalog-poll-interval"`
 	CatalogTimeout       time.Duration `default:"10s" env:"OVERTURE_CATALOG_TIMEOUT" help:"Complete catalog freshness-check deadline." name:"catalog-timeout"`
 	Fields               []string      `default:"id,geometry,names,basic_category" env:"OVERTURE_FIELDS" help:"Comma-separated top-level output fields." name:"fields" sep:","`
+	MinTileResolution    int           `default:"2" env:"OVERTURE_MIN_TILE_RESOLUTION" help:"Minimum H3 tile resolution (0-15); coarser requests are rejected without building." name:"min-tile-resolution"`
 	MaxTileBytes         int64         `default:"8388608" env:"OVERTURE_MAX_TILE_BYTES" help:"Maximum complete zstd Parquet tile size in bytes." name:"max-tile-bytes"`
 	MaxTileRows          int64         `default:"100000" env:"OVERTURE_MAX_TILE_ROWS" help:"Additional early tile row rejection threshold." name:"max-tile-rows"`
 	CacheDir             string        `default:"/var/cache/overture" env:"OVERTURE_CACHE_DIR" help:"Exclusive writable cache root." name:"cache-dir"`
@@ -110,6 +113,9 @@ func Parse(args []string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Mode != ModeSupervisor && c.Mode != ModeWorker {
 		return fmt.Errorf("mode %q is not supported", c.Mode)
+	}
+	if c.MinTileResolution < 0 || c.MinTileResolution > h3.MaxResolution {
+		return fmt.Errorf("min-tile-resolution must be between 0 and %d, got %d", h3.MaxResolution, c.MinTileResolution)
 	}
 	if err := validateListenAddress(c.Listen); err != nil {
 		return err

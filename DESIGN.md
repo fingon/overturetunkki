@@ -158,10 +158,12 @@ a request keyed by a newer version.
 | `GET /readyz` | Catalog ready, workers healthy, cache writable, and resources available. |
 | `GET /metrics` | Operational metrics, restricted by deployment networking. |
 
-Reject a missing version with `400`; reject a different version with `409`
-before looking up its tile. Validate a canonical lowercase hexadecimal H3 cell
-index, cell mode, and resolution 0 through 15; resolution comes from the index.
-Reject invalid indexes with `400`, without touching DuckDB.
+Reject a missing version or invalid cell with `400`. Validate a canonical
+lowercase hexadecimal H3 cell index, cell mode, and resolution 0 through 15;
+resolution comes from the index. Requests below `min_tile_resolution` return
+`422` before any freshness check, version comparison, cache lookup, or job
+admission. Other requests revalidate freshness and reject a different version
+with `409` before looking up the tile.
 
 Successful responses include `Content-Type: application/vnd.apache.parquet`,
 `Content-Length`, a content-digest ETag, `Overture-Release`,
@@ -185,8 +187,9 @@ Errors are JSON with `code`, `message`, `retryable`, and known catalog context:
 
 Every response carries an `X-Request-ID`. A valid client-provided ID is echoed;
 otherwise the server assigns a bounded process-local ID. HTTP failures are
-logged with that ID and request metadata. Tile handlers use a bounded admission
-semaphore (`TileConcurrency`, default 2); saturation returns
+logged with that ID and request metadata. Tile handlers admit a bounded number
+of distinct tiles (`TileConcurrency`, default 2), and duplicate requests share
+a slot; saturation for a different tile returns
 `503 capacity_unavailable` with `Retry-After: 1`. The metrics endpoint exposes
 only fixed-cardinality counters for total, catalog, tile, 4xx, 5xx, and
 capacity-rejection requests, plus catalog readiness. Complete tile responses
@@ -195,7 +198,14 @@ Shutdown rejects new requests, waits for accepted handlers to finish, and
 returns the caller's deadline error if draining does not complete in time.
 
 A size error includes the cell, resolution, `max_tile_bytes`, the failed limit
-(`compressed_bytes` or `rows`), and `suggested_resolution = resolution + 1`.
+(`compressed_bytes`, `rows`, or `resolution`), and a suggested finer resolution.
+For row/byte limits, `suggested_resolution = resolution + 1`; for resolution
+rejections, suggest `min_tile_resolution`. The default minimum is H3 resolution
+2, approximately 300–365 km across using average edge lengths, with geographic
+variation. Configure it with `--min-tile-resolution` or
+`OVERTURE_MIN_TILE_RESOLUTION` (0–15). Resolutions below the minimum always
+return `422 tile_too_large`, even if cached; the catalog advertises only the
+allowed resolutions. Resolution rejections need no negative-cache entry.
 This is advice, not a guarantee the next resolution fits. At resolution 15,
 return `can_refine: false` with no suggested resolution; clients must omit the
 tile or use a deployment with different limits/fields. Never return truncated
@@ -354,8 +364,11 @@ and worker planning/materialization/COPY/validation timings. Returned worker
 failures include their phase; process interruption before a protocol response
 is labeled `process`. Caller cancellation is logged at warning level and maps
 to the existing retryable `504 tile_timeout` response rather than an internal
-server error. When all callers detach, the existing scheduler cancels the job;
-one canceled caller does not cancel a job still needed by another caller.
+server error. Cancellation of the last caller discards a queued job. Once a
+worker dequeues a job, caller cancellation only detaches that caller: the job
+continues through validation and cache publication and remains available for
+later callers to join. Shutdown and the worker deadline still cancel running
+work. Detached-job failures and cleanup errors are logged with tile identity.
 
 For admitted rows, use DuckDB `COPY (SELECT <projection> FROM candidate)` to a
 single staging file with `FORMAT PARQUET, COMPRESSION ZSTD`. Do not split output
@@ -434,19 +447,20 @@ constant S3 transfer.
 `internal/cache` owns the cache root with a nonblocking OS lock, derives final
 and staging paths from a SHA-256 cache key, and accounts byte/entry reservations
 under one mutex. Its keyed scheduler bounds the worker queue, coalesces callers
-for one key, detaches canceled callers, cancels abandoned jobs, and releases
+for one key, detaches canceled callers, discards abandoned queued jobs, and
+finishes running jobs without callers. It releases
 reservations after build cleanup. It publishes a file and sidecar atomically,
 maintains a doubly linked LRU with reader pins and obsolete-generation priority,
 batches recency writes, and reconciles corrupt/orphan state at startup. Quota
 reservation and negative-cache policy remain separate. `ScratchPool` enforces
-deployment-wide scratch reservations with caller cancellation. `NegativeCache`
+deployment-wide scratch reservations with job cancellation. `NegativeCache`
 accepts only constructed row/byte size proofs, bounds them with an LRU and TTL,
 and supports catalog-version invalidation; transient failures have no insertion
 path.
 
 Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.
-The size policy hashes byte/row limits, preventing reuse of outdated rejection
-results. Compression and writer revisions are part of projection identity.
+The size policy hashes byte/row limits, the minimum resolution, and selected
+fields, preventing reuse across different admission and rejection policies. Compression and writer revisions are part of projection identity.
 Files live under hash-derived paths, never raw request paths.
 
 Maintain an in-memory map and doubly linked LRU with persistent sidecar metadata
@@ -479,15 +493,46 @@ cache. Delete/cancellation failures retain accounting and are logged/retried.
 
 Coalesce simultaneous requests for the same key into one build. Bound workers
 and the waiting queue; return `503` when full. Caller cancellation detaches that
-caller; cancel work when no callers remain, on generation invalidation, or on
-job deadline. Cancel SQL then terminate an unresponsive isolated worker. Release
+caller. Discard queued work when no callers remain; after dequeue (including
+reservation acquisition), finish work even without callers. Cancel running work
+on shutdown or worker deadline. HTTP admission counts distinct
+`(catalog_version, projection_id, cell)` requests up to `worker_count`; callers
+for an already admitted tile share its slot until their final handler finishes.
+Each scheduled build rechecks positive and negative caches before starting
+expensive work, preventing a stale miss from launching a duplicate build. Cancel
+SQL then terminate an unresponsive isolated worker. Release
 reservations only after cleanup. Bound slow-client write time so pinned files
 cannot consume capacity indefinitely.
 
 Deterministic cache tests cover exact byte/entry quota boundaries, pinned
-capacity failures, parallel distinct-key admissions, last-waiter cancellation,
-generation-key fencing, publication/storage failures, interrupted sidecar
+capacity failures, parallel distinct-key admissions, last-waiter detachment,
+abandoned queued jobs, detached publication, later reattachment, shared HTTP
+admission, generation-key fencing, publication/storage failures, interrupted sidecar
 publication, orphan cleanup, corruption, and restart accounting.
+
+On an exact miss, try deriving the requested tile from cached coarser tiles.
+Search resolutions from nearest to coarsest, down to `min_tile_resolution`, and
+use the first complete covering set with matching catalog, projection, and
+size policy. Enumerate conservative geographic bounds with H3's
+`ContainmentOverlappingBbox` mode, splitting antimeridian intervals; logical
+parent membership alone cannot prove coverage. Require every source at one
+resolution, with at most 64 files. Global/polar bounds and intervals spanning
+180 degrees or more fall back upstream, as do incomplete or excessive covers.
+Do not combine mixed resolutions, wait for larger builds, or merge partial
+cached coverage with upstream data.
+
+Pin source readers during selection and worker execution. Missing entries
+release partial pins and allow trying the next coarser resolution; unexpected
+filesystem, query, or cleanup failures propagate. Pass optional absolute local
+`source_paths` in the `tile-v1` worker request. An absent/empty list retains
+upstream selection. DuckDB reads GeoParquet geometry as native geometry and
+filters the combined local files by exact H3 point membership, preserving the
+selected columns and row semantics. Reuse existing limits, scratch, timeout,
+COPY, metadata, and validation. Release source pins after worker validation,
+before publishing under the requested tile's own key. Derived tiles and proven
+size rejections follow normal cache policy. Logs identify source kind, count,
+and bytes. Boundary, nested-column, empty-output, antimeridian, incomplete-cover,
+identity, corruption, and cleanup tests verify local reuse.
 
 Cache `tile_too_large` decisions in a separate bounded in-memory LRU with a short
 TTL, keyed identically. Do not cache transient upstream/storage failures as size
@@ -523,6 +568,7 @@ These defaults are starting points to validate with representative POIs.
 | `--fields` | `id,geometry,names,basic_category` | Output projection. |
 | `--max-tile-bytes` | `8388608` | Maximum complete zstd Parquet size, 8 MiB. |
 | `--max-tile-rows` | `100000` | Additional early rejection threshold. |
+| `--min-tile-resolution` | `2` | Coarser H3 requests always return `tile_too_large`; valid range 0–15. |
 | `--cache-dir` | `/var/cache/overture` | Exclusive writable cache root. |
 | `--cache-max-bytes` | `10737418240` | Complete files plus reservations, 10 GiB. |
 | `--cache-max-entries` | `100000` | Bounds file/metadata count. |
@@ -556,7 +602,9 @@ target. `build-linux` uses the pinned Go
 container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
 `build/tools/go.mod`, isolated from application dependencies; Podman runs it
 in Linux and loads its image tarballs. No Docker daemon is required.
-On macOS, build/test/vet select the CGO H3 client; the service remains Linux-only.
+Linux `make test` fetches checksum-pinned extensions and supplies their directory
+to the real spatial derivation tests. On macOS, build/test/vet select the CGO H3
+client; the service remains Linux-only.
 GitHub Actions tests amd64 and arm64 on Linux and gates
 Linux images with smoke and lifecycle tests. CI caches host Go modules and
 build results using both module checksum files, prek hook environments, and

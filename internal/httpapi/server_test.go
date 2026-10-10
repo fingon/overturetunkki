@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/fingon/overturetunkki/internal/cache"
 	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/config"
 	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
@@ -166,6 +168,8 @@ func TestServerCatalogAndHealthEndpoints(t *testing.T) {
 	assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.Equal(t, response.Release, observer.snapshot.Release)
 	assert.Equal(t, response.MaxTileBytes, int64(1024))
+	assert.Equal(t, response.SupportedH3Resolutions[0], config.DefaultMinTileResolution)
+	assert.Equal(t, response.SupportedH3Resolutions[len(response.SupportedH3Resolutions)-1], h3.MaxResolution)
 	assert.DeepEqual(t, response.Fields, []string{"id", "geometry", "names"})
 
 	recorder = httptest.NewRecorder()
@@ -411,7 +415,11 @@ func TestServerShutdownDrainsAndRejectsNewRequests(t *testing.T) {
 	<-provider.started
 
 	capacityRecorder := httptest.NewRecorder()
-	server.ServeHTTP(capacityRecorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+	neighbor, cellErr := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, cell.Resolution())
+	assert.NilError(t, cellErr)
+	assert.Assert(t, neighbor != cell)
+	neighborURL := "/v1/tiles/places/" + neighbor.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+	server.ServeHTTP(capacityRecorder, httptest.NewRequest(http.MethodGet, neighborURL, nil))
 	assert.Equal(t, capacityRecorder.Code, http.StatusServiceUnavailable)
 	var capacityResponse errorResponse
 	assert.NilError(t, json.Unmarshal(capacityRecorder.Body.Bytes(), &capacityResponse))
@@ -581,11 +589,12 @@ func TestNewServerValidatesOptions(t *testing.T) {
 
 func testOptions(observer CatalogObserver, provider TileProvider) Options {
 	return Options{
-		Observer:     observer,
-		Provider:     provider,
-		Fields:       []string{"id", "geometry", "names"},
-		MaxTileBytes: 1024,
-		MaxTileRows:  10,
+		Observer:          observer,
+		Provider:          provider,
+		Fields:            []string{"id", "geometry", "names"},
+		MaxTileBytes:      1024,
+		MaxTileRows:       10,
+		MinTileResolution: config.DefaultMinTileResolution,
 		AttributionURL: []string{
 			"https://overturemaps.org",
 		},
@@ -610,4 +619,116 @@ func testCell(tb testing.TB) h3.Cell {
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.775938728915946, -122.41795063018799), 9)
 	assert.NilError(tb, err)
 	return cell
+}
+
+func TestServerDuplicateTilesShareAdmission(t *testing.T) {
+	data := []byte("complete cached tile")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	digest := sha256.Sum256(data)
+	observer := &testObserver{snapshot: testSnapshot()}
+	provider := &blockingProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		tile:    Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])},
+	}
+	options := testOptions(observer, provider)
+	options.TileConcurrency = 1
+	server, err := New(options)
+	assert.NilError(t, err)
+	cell := testCell(t)
+	tileURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+	done := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+			done <- recorder
+		}()
+	}
+	<-provider.started
+	deadline := time.Now().Add(time.Second)
+	key := tileAdmissionKey{catalogVersion: observer.snapshot.CatalogVersion, projectionID: observer.snapshot.ProjectionID, cell: cell}
+	for {
+		server.stateMu.Lock()
+		count := server.tileAdmissions[key]
+		server.stateMu.Unlock()
+		if count == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("duplicate request was not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	neighbor, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, cell.Resolution())
+	assert.NilError(t, err)
+	assert.Assert(t, neighbor != cell)
+	recorder := httptest.NewRecorder()
+	neighborURL := "/v1/tiles/places/" + neighbor.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, neighborURL, nil))
+	assert.Equal(t, recorder.Code, http.StatusServiceUnavailable)
+	provider.release <- struct{}{}
+	first := <-done
+	assert.Equal(t, first.Code, http.StatusOK)
+	assert.Equal(t, first.Body.String(), string(data))
+	server.stateMu.Lock()
+	assert.Equal(t, server.tileAdmissions[key], 1)
+	server.stateMu.Unlock()
+	close(provider.release)
+	second := <-done
+	assert.Equal(t, second.Code, http.StatusOK)
+	assert.Equal(t, second.Body.String(), string(data))
+	server.stateMu.Lock()
+	assert.Equal(t, len(server.tileAdmissions), 0)
+	server.stateMu.Unlock()
+}
+
+func TestServerRejectsCoarseTilesBeforeCatalogAndProvider(t *testing.T) {
+	for _, minimum := range []int{0, 2, 4, h3.MaxResolution} {
+		t.Run(strconv.Itoa(minimum), func(t *testing.T) {
+			observer := &testObserver{snapshot: testSnapshot(), refreshErr: errors.New("catalog unavailable")}
+			provider := &testProvider{err: worker.ErrTooManyRows}
+			options := testOptions(observer, provider)
+			options.MinTileResolution = minimum
+			server, err := New(options)
+			assert.NilError(t, err)
+			for resolution := range minimum {
+				cell, cellErr := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, resolution)
+				assert.NilError(t, cellErr)
+				request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+cell.String()+"?catalog_version=version", nil)
+				recorder := httptest.NewRecorder()
+				server.ServeHTTP(recorder, request)
+				assert.Equal(t, recorder.Code, http.StatusUnprocessableEntity)
+				var response errorResponse
+				assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+				assert.Equal(t, response.Code, "tile_too_large")
+				assert.Equal(t, response.FailedLimit, "resolution")
+				assert.Equal(t, *response.Resolution, resolution)
+				assert.Equal(t, *response.SuggestedResolution, minimum)
+				assert.Assert(t, *response.CanRefine)
+			}
+			assert.Equal(t, observer.refreshes, 0)
+			assert.Equal(t, provider.calls, 0)
+			observer.refreshErr = nil
+			cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, minimum)
+			assert.NilError(t, err)
+			recorder := httptest.NewRecorder()
+			tileURL := "/v1/tiles/places/" + cell.String() + "?catalog_version=" + url.QueryEscape(observer.snapshot.CatalogVersion)
+			server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tileURL, nil))
+			assert.Equal(t, recorder.Code, http.StatusUnprocessableEntity)
+			var response errorResponse
+			assert.NilError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, response.FailedLimit, "rows")
+			assert.Equal(t, provider.calls, 1)
+			assert.Equal(t, observer.refreshes, 1)
+			assert.Equal(t, supportedH3Resolutions(minimum)[0], minimum)
+		})
+	}
+	for _, minimum := range []int{-1, h3.MaxResolution + 1} {
+		options := testOptions(&testObserver{}, &testProvider{})
+		options.MinTileResolution = minimum
+		_, err := New(options)
+		assert.ErrorContains(t, err, "minimum tile resolution")
+	}
 }
