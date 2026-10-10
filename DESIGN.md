@@ -577,7 +577,7 @@ These defaults are starting points to validate with representative POIs.
 | `--worker-memory-bytes` | `536870912` | DuckDB memory limit per worker, 512 MiB. |
 | `--worker-threads` | `2` | DuckDB threads per worker. |
 | `--queue-capacity` | `32` | Waiting builds. |
-| `--tile-timeout` | `30s` | Queue plus query deadline. |
+| `--tile-timeout` | `5m` | Queue plus query deadline. |
 | `--negative-cache-entries` | `10000` | Maximum retained size rejections. |
 | `--negative-cache-ttl` | `5m` | Rejection lifetime. |
 | `--write-timeout` | `30s` | Maximum response transmission time. |

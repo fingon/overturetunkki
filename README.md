@@ -89,7 +89,7 @@ protocol and is not a standalone HTTP service.
 | `--worker-memory-bytes` | `OVERTURE_WORKER_MEMORY_BYTES` | `536870912` (512 MiB per worker) |
 | `--worker-threads` | `OVERTURE_WORKER_THREADS` | `2` per worker |
 | `--queue-capacity` | `OVERTURE_QUEUE_CAPACITY` | `32` waiting builds |
-| `--tile-timeout` | `OVERTURE_TILE_TIMEOUT` | `30s` |
+| `--tile-timeout` | `OVERTURE_TILE_TIMEOUT` | `5m` |
 | `--negative-cache-entries` | `OVERTURE_NEGATIVE_CACHE_ENTRIES` | `10000` |
 | `--negative-cache-ttl` | `OVERTURE_NEGATIVE_CACHE_TTL` | `5m` |
 | `--write-timeout` | `OVERTURE_WRITE_TIMEOUT` | `30s` |

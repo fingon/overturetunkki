@@ -36,7 +36,7 @@ const (
 	DefaultWorkerMemoryBytes    int64 = 512 * 1024 * 1024
 	DefaultWorkerThreads        int64 = 2
 	DefaultQueueCapacity        int64 = 32
-	DefaultTileTimeout                = 30 * time.Second
+	DefaultTileTimeout                = 5 * time.Minute
 	DefaultNegativeCacheEntries int64 = 10_000
 	DefaultNegativeCacheTTL           = 5 * time.Minute
 	DefaultWriteTimeout               = 30 * time.Second
@@ -63,7 +63,7 @@ type Config struct {
 	WorkerMemoryBytes    int64         `default:"536870912" env:"OVERTURE_WORKER_MEMORY_BYTES" help:"DuckDB memory limit per worker in bytes." name:"worker-memory-bytes"`
 	WorkerThreads        int64         `default:"2" env:"OVERTURE_WORKER_THREADS" help:"DuckDB threads per worker." name:"worker-threads"`
 	QueueCapacity        int64         `default:"32" env:"OVERTURE_QUEUE_CAPACITY" help:"Maximum waiting tile builds." name:"queue-capacity"`
-	TileTimeout          time.Duration `default:"30s" env:"OVERTURE_TILE_TIMEOUT" help:"Queue and tile query deadline." name:"tile-timeout"`
+	TileTimeout          time.Duration `default:"5m" env:"OVERTURE_TILE_TIMEOUT" help:"Queue and tile query deadline." name:"tile-timeout"`
 	NegativeCacheEntries int64         `default:"10000" env:"OVERTURE_NEGATIVE_CACHE_ENTRIES" help:"Maximum retained size rejections." name:"negative-cache-entries"`
 	NegativeCacheTTL     time.Duration `default:"5m" env:"OVERTURE_NEGATIVE_CACHE_TTL" help:"Size rejection lifetime." name:"negative-cache-ttl"`
 	WriteTimeout         time.Duration `default:"30s" env:"OVERTURE_WRITE_TIMEOUT" help:"Maximum response transmission time." name:"write-timeout"`
