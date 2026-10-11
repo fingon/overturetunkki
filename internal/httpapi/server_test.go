@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,7 +52,21 @@ func (observer *testObserver) Current() (catalog.Generation, error) {
 	if observer.readyErr != nil {
 		return catalog.Generation{}, observer.readyErr
 	}
-	return catalog.Generation{Number: 3, Snapshot: observer.snapshot}, nil
+	return catalog.Generation{Number: 3, Snapshot: observer.snapshot, Context: context.Background()}, nil
+}
+
+func (observer *testObserver) WithCurrent(publish func(catalog.Generation)) error {
+	generation, err := observer.Current()
+	if err != nil {
+		return err
+	}
+	publish(generation)
+	return nil
+}
+
+func (observer *testObserver) State() catalog.State {
+	generation, err := observer.Current()
+	return catalog.State{Ready: err == nil, Snapshot: generation.Snapshot, Err: err}
 }
 
 func (observer *testObserver) refreshCount() int {
@@ -92,7 +107,7 @@ type blockingProvider struct {
 	once    sync.Once
 }
 
-func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Snapshot, _ h3.Cell) (Tile, error) {
+func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Generation, _ h3.Cell) (Tile, error) {
 	provider.once.Do(func() { close(provider.started) })
 	select {
 	case <-provider.release:
@@ -133,7 +148,7 @@ func (writer *deadlineResponseWriter) deadlineValues() []time.Time {
 	return append([]time.Time(nil), writer.deadlines...)
 }
 
-func (provider *testProvider) Get(context.Context, catalog.Snapshot, h3.Cell) (Tile, error) {
+func (provider *testProvider) Get(context.Context, catalog.Generation, h3.Cell) (Tile, error) {
 	provider.mu.Lock()
 	provider.calls++
 	tile, err, onGet := provider.tile, provider.err, provider.onGet
@@ -730,5 +745,156 @@ func TestServerRejectsCoarseTilesBeforeCatalogAndProvider(t *testing.T) {
 		options.MinTileResolution = minimum
 		_, err := New(options)
 		assert.ErrorContains(t, err, "minimum tile resolution")
+	}
+}
+
+func TestServerSharesObserverFreshnessAcrossCatalogAndTileRequests(t *testing.T) {
+	checker := &testObserver{snapshot: testSnapshot()}
+	now := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+	observer, err := catalog.NewObserver(checker, catalog.ObserverOptions{PollInterval: 24 * time.Hour, StaleGrace: 24 * time.Hour, Now: func() time.Time { return now }})
+	assert.NilError(t, err)
+	data := []byte("complete parquet bytes")
+	path := filepath.Join(t.TempDir(), "tile.parquet")
+	assert.NilError(t, os.WriteFile(path, data, 0o600))
+	digest := sha256.Sum256(data)
+	provider := &testProvider{tile: Tile{Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])}}
+	server, err := New(testOptions(observer, provider))
+	assert.NilError(t, err)
+	tileURL := "/v1/tiles/places/" + testCell(t).String() + "?catalog_version=" + url.QueryEscape(checker.snapshot.CatalogVersion)
+	cases := []struct {
+		name, path, etag string
+		status           int
+	}{
+		{name: "catalog", path: "/v1/catalog", status: http.StatusOK},
+		{name: "tile", path: tileURL, status: http.StatusOK},
+		{name: "conditional tile", path: tileURL, etag: `"` + provider.tile.Digest + `"`, status: http.StatusNotModified},
+	}
+	for range 10 {
+		for _, test := range cases {
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.Header.Set("If-None-Match", test.etag)
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, request)
+			assert.Equal(t, recorder.Code, test.status, test.name)
+		}
+	}
+	assert.Equal(t, checker.refreshCount(), 1)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	assert.Assert(t, strings.Contains(recorder.Body.String(), "overture_catalog_last_success_timestamp_seconds "+strconv.FormatInt(now.Unix(), 10)+"\n"))
+	assert.Assert(t, strings.Contains(recorder.Body.String(), "overture_catalog_refresh_successes_total 1\n"))
+	assert.Assert(t, strings.Contains(recorder.Body.String(), "overture_catalog_refresh_failures_total 0\n"))
+}
+
+type catalogChangingReader struct {
+	*os.File
+	onStat func()
+}
+
+func (reader *catalogChangingReader) Stat() (os.FileInfo, error) {
+	reader.onStat()
+	return reader.File.Stat()
+}
+
+func TestServerChecksGenerationImmediatelyBeforeHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		fail   bool
+		etag   bool
+		status int
+	}{
+		{name: "changed", status: http.StatusConflict},
+		{name: "changed conditional", etag: true, status: http.StatusConflict},
+		{name: "unready", fail: true, status: http.StatusServiceUnavailable},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			observer := &testObserver{snapshot: testSnapshot()}
+			data := []byte("complete parquet bytes")
+			path := filepath.Join(t.TempDir(), "tile.parquet")
+			assert.NilError(t, os.WriteFile(path, data, 0o600))
+			file, err := os.Open(path)
+			assert.NilError(t, err)
+			reader := &catalogChangingReader{File: file, onStat: func() {
+				observer.mu.Lock()
+				defer observer.mu.Unlock()
+				if test.fail {
+					observer.readyErr = errors.New("generation fenced")
+				} else {
+					observer.snapshot.CatalogVersion = "new-version"
+				}
+			}}
+			digest := sha256.Sum256(data)
+			provider := &testProvider{tile: Tile{Reader: reader, Path: path, SizeBytes: int64(len(data)), Digest: "sha256:" + hex.EncodeToString(digest[:])}}
+			server, err := New(testOptions(observer, provider))
+			assert.NilError(t, err)
+			request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+testCell(t).String()+"?catalog_version="+url.QueryEscape(observer.snapshot.CatalogVersion), nil)
+			if test.etag {
+				request.Header.Set("If-None-Match", `"`+provider.tile.Digest+`"`)
+			}
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, request)
+			assert.Equal(t, recorder.Code, test.status)
+			assert.Equal(t, recorder.Header().Get(catalogVersionHeader), "")
+		})
+	}
+}
+
+func TestServerCancelsObsoleteBuilds(t *testing.T) {
+	cases := []struct {
+		name    string
+		expiry  bool
+		invalid bool
+		status  int
+	}{
+		{name: "grace expired", expiry: true, status: http.StatusServiceUnavailable},
+		{name: "invalid replacement", invalid: true, status: http.StatusServiceUnavailable},
+		{name: "new catalog", status: http.StatusConflict},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			checker := &testObserver{snapshot: testSnapshot()}
+			var clockNS atomic.Int64
+			clockNS.Store(time.Now().UnixNano())
+			observer, err := catalog.NewObserver(checker, catalog.ObserverOptions{PollInterval: time.Hour, StaleGrace: time.Hour, Now: func() time.Time { return time.Unix(0, clockNS.Load()) }})
+			assert.NilError(t, err)
+			snapshot, err := observer.Refresh(t.Context())
+			assert.NilError(t, err)
+			provider := &blockingProvider{started: make(chan struct{}), release: make(chan struct{})}
+			server, err := New(testOptions(observer, provider))
+			assert.NilError(t, err)
+			request := httptest.NewRequest(http.MethodGet, "/v1/tiles/places/"+testCell(t).String()+"?catalog_version="+url.QueryEscape(snapshot.CatalogVersion), nil)
+			recorder := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { server.ServeHTTP(recorder, request); close(done) }()
+			select {
+			case <-provider.started:
+			case <-time.After(time.Second):
+				t.Fatal("build did not start")
+			}
+			if test.expiry {
+				clockNS.Add(int64(2 * time.Hour))
+				_, err = observer.Current()
+				assert.Assert(t, err != nil)
+			} else {
+				checker.mu.Lock()
+				if test.invalid {
+					checker.refreshErr = errors.New("invalid replacement")
+				} else {
+					checker.snapshot.CatalogVersion = "new-version"
+				}
+				checker.mu.Unlock()
+				clockNS.Add(int64(time.Hour))
+				_, err = observer.Refresh(t.Context())
+				assert.NilError(t, err)
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				close(provider.release)
+				t.Fatal("obsolete build was not canceled")
+			}
+			assert.Equal(t, recorder.Code, test.status)
+		})
 	}
 }

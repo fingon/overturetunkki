@@ -102,7 +102,7 @@ func TestTileProviderRejectsCoarseTilesBeforeCache(t *testing.T) {
 	for resolution := range config.DefaultMinTileResolution {
 		cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, resolution)
 		assert.NilError(t, err)
-		_, err = provider.Get(t.Context(), catalog.Snapshot{}, cell)
+		_, err = provider.Get(t.Context(), catalog.Generation{}, cell)
 		assert.Assert(t, errors.Is(err, worker.ErrResolutionTooCoarse))
 		tooCoarse, ok := errors.AsType[*worker.ResolutionTooCoarseError](err)
 		assert.Assert(t, ok)

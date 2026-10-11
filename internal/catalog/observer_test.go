@@ -104,7 +104,7 @@ func TestNewObserverValidatesOptions(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewObserver(test.checker, test.period)
+			_, err := NewObserver(test.checker, ObserverOptions{PollInterval: test.period})
 			assert.ErrorContains(t, err, test.message)
 		})
 	}
@@ -113,7 +113,7 @@ func TestNewObserverValidatesOptions(t *testing.T) {
 func TestObserverStartsUnreadyUntilFreshCheck(t *testing.T) {
 	startupErr := errors.New("stale startup state")
 	checker := &observerChecker{steps: []observerCheckStep{{err: startupErr}}}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -144,7 +144,7 @@ func TestObserverCoalescesOverlappingRefreshes(t *testing.T) {
 		}},
 		started: make(chan int, 2),
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -177,7 +177,7 @@ func TestObserverCallerCancellationDetachesFromSharedCheck(t *testing.T) {
 		steps:   []observerCheckStep{{snapshot: snapshot, wait: release}},
 		started: make(chan int, 1),
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -216,7 +216,7 @@ func TestObserverFencesGenerationBeforeFailedReplacement(t *testing.T) {
 		},
 		started: make(chan int, 2),
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -232,6 +232,7 @@ func TestObserverFencesGenerationBeforeFailedReplacement(t *testing.T) {
 
 	checkResult := make(chan error, 1)
 	go func() {
+		advanceObserverFreshness(observer)
 		_, err := observer.Refresh(context.Background())
 		checkResult <- err
 	}()
@@ -247,7 +248,7 @@ func TestObserverFencesGenerationBeforeFailedReplacement(t *testing.T) {
 		t.Fatal("old generation was not fenced")
 	}
 	_, err = observer.Current()
-	assert.Assert(t, errors.Is(err, ErrCatalogNotReady))
+	assert.Assert(t, errors.Is(err, ErrCatalogUnavailable))
 	close(release)
 	assert.ErrorContains(t, receiveObserverError(t, checkResult), "incompatible replacement")
 	state := observer.State()
@@ -268,7 +269,7 @@ func TestObserverPublishesReplacementAndCancelsOldGeneration(t *testing.T) {
 		},
 		started: make(chan int, 2),
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -283,6 +284,7 @@ func TestObserverPublishesReplacementAndCancelsOldGeneration(t *testing.T) {
 	}
 	checkResult := make(chan error, 1)
 	go func() {
+		advanceObserverFreshness(observer)
 		_, err := observer.Refresh(context.Background())
 		checkResult <- err
 	}()
@@ -321,7 +323,7 @@ func TestObserverPublishesRollbackAsNewGeneration(t *testing.T) {
 		{snapshot: newSnapshot},
 		{snapshot: oldSnapshot},
 	}}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -335,6 +337,7 @@ func TestObserverPublishesRollbackAsNewGeneration(t *testing.T) {
 		return
 	}
 
+	advanceObserverFreshness(observer)
 	_, err = observer.Refresh(context.Background())
 	assert.NilError(t, err)
 	newGeneration, err := observer.Current()
@@ -350,6 +353,7 @@ func TestObserverPublishesRollbackAsNewGeneration(t *testing.T) {
 		t.Fatal("old generation was not canceled")
 	}
 
+	advanceObserverFreshness(observer)
 	_, err = observer.Refresh(context.Background())
 	assert.NilError(t, err)
 	rollbackGeneration, err := observer.Current()
@@ -371,7 +375,7 @@ func TestObserverFailureFencesCurrentGeneration(t *testing.T) {
 	checker := &observerChecker{
 		steps: []observerCheckStep{{snapshot: oldSnapshot}, {err: errors.New("upstream unavailable")}},
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -383,6 +387,7 @@ func TestObserverFailureFencesCurrentGeneration(t *testing.T) {
 	if err != nil {
 		return
 	}
+	advanceObserverFreshness(observer)
 	_, err = observer.Refresh(context.Background())
 	assert.ErrorContains(t, err, "upstream unavailable")
 	select {
@@ -407,11 +412,12 @@ func TestObserverRunRetriesStartupAndPollsWhileIdle(t *testing.T) {
 		},
 		started: make(chan int, 100),
 	}
-	observer, err := NewObserver(checker, time.Millisecond)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Millisecond})
 	assert.NilError(t, err)
 	if err != nil {
 		return
 	}
+	observer.retryBase = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	runResult := make(chan error, 1)
 	go func() { runResult <- observer.Run(ctx) }()
@@ -439,7 +445,7 @@ func TestObserverRejectsConcurrentRun(t *testing.T) {
 		steps:   []observerCheckStep{{snapshot: observerTestSnapshot("old"), wait: release}},
 		started: make(chan int, 1),
 	}
-	observer, err := NewObserver(checker, time.Minute)
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
 	assert.NilError(t, err)
 	if err != nil {
 		return
@@ -481,4 +487,11 @@ func waitForObserverReady(t *testing.T, observer *Observer) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("observer did not become ready")
+}
+
+func advanceObserverFreshness(observer *Observer) {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	now := observer.now().Add(observer.pollInterval)
+	observer.now = func() time.Time { return now }
 }

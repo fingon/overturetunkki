@@ -51,7 +51,7 @@ func runSupervisor(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create catalog manager: %w", err)
 	}
-	observer, err := catalog.NewObserver(manager, cfg.CatalogPollInterval)
+	observer, err := catalog.NewObserver(manager, catalog.ObserverOptions{PollInterval: cfg.CatalogPollInterval, StaleGrace: cfg.CatalogStaleGrace})
 	if err != nil {
 		return fmt.Errorf("create catalog observer: %w", err)
 	}

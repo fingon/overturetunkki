@@ -23,7 +23,8 @@ const (
 
 	DefaultListen                     = ":8080"
 	DefaultCatalogURL                 = "https://stac.overturemaps.org/catalog.json"
-	DefaultCatalogPollInterval        = time.Minute
+	DefaultCatalogPollInterval        = 24 * time.Hour
+	DefaultCatalogStaleGrace          = DefaultCatalogPollInterval
 	DefaultCatalogTimeout             = 10 * time.Second
 	DefaultMinTileResolution          = 2
 	DefaultMaxTileBytes         int64 = 8 * 1024 * 1024
@@ -49,7 +50,8 @@ type Config struct {
 	CatalogURL           string        `default:"https://stac.overturemaps.org/catalog.json" env:"OVERTURE_CATALOG_URL" help:"Trusted STAC catalog endpoint." name:"catalog-url"`
 	CatalogHost          string        `default:"stac.overturemaps.org" env:"OVERTURE_CATALOG_HOST" help:"Trusted STAC catalog host." name:"catalog-host"`
 	AssetHost            string        `default:"overturemaps-us-west-2.s3.us-west-2.amazonaws.com" env:"OVERTURE_ASSET_HOST" help:"Trusted places asset host." name:"asset-host"`
-	CatalogPollInterval  time.Duration `default:"1m" env:"OVERTURE_CATALOG_POLL_INTERVAL" help:"Additional idle catalog refresh interval." name:"catalog-poll-interval"`
+	CatalogPollInterval  time.Duration `default:"24h" env:"OVERTURE_CATALOG_POLL_INTERVAL" help:"Shared catalog freshness and background refresh interval." name:"catalog-poll-interval"`
+	CatalogStaleGrace    time.Duration `default:"24h" env:"OVERTURE_CATALOG_STALE_GRACE" help:"Additional time to serve validated catalog during transient upstream failures." name:"catalog-stale-grace"`
 	CatalogTimeout       time.Duration `default:"10s" env:"OVERTURE_CATALOG_TIMEOUT" help:"Complete catalog freshness-check deadline." name:"catalog-timeout"`
 	Fields               []string      `default:"id,geometry,names,basic_category" env:"OVERTURE_FIELDS" help:"Comma-separated top-level output fields." name:"fields" sep:","`
 	MinTileResolution    int           `default:"2" env:"OVERTURE_MIN_TILE_RESOLUTION" help:"Minimum H3 tile resolution (0-15); coarser requests are rejected without building." name:"min-tile-resolution"`
@@ -128,6 +130,9 @@ func (c Config) Validate() error {
 	}
 	if err := validateTrustedHost(c.AssetHost, "asset-host"); err != nil {
 		return err
+	}
+	if c.CatalogStaleGrace < 0 || (c.CatalogPollInterval > 0 && c.CatalogStaleGrace > time.Duration(1<<63-1)-c.CatalogPollInterval) {
+		return errors.New("catalog-stale-grace must be nonnegative and fit with catalog-poll-interval")
 	}
 	positiveDurations := []struct {
 		name  string

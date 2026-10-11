@@ -75,7 +75,8 @@ protocol and is not a standalone HTTP service.
 | `--catalog-url` | `OVERTURE_CATALOG_URL` | `https://stac.overturemaps.org/catalog.json` |
 | `--catalog-host` | `OVERTURE_CATALOG_HOST` | `stac.overturemaps.org` |
 | `--asset-host` | `OVERTURE_ASSET_HOST` | `overturemaps-us-west-2.s3.us-west-2.amazonaws.com` |
-| `--catalog-poll-interval` | `OVERTURE_CATALOG_POLL_INTERVAL` | `1m` |
+| `--catalog-poll-interval` | `OVERTURE_CATALOG_POLL_INTERVAL` | `24h` |
+| `--catalog-stale-grace` | `OVERTURE_CATALOG_STALE_GRACE` | `24h` |
 | `--catalog-timeout` | `OVERTURE_CATALOG_TIMEOUT` | `10s` |
 | `--fields` | `OVERTURE_FIELDS` | `id,geometry,names,basic_category` |
 | `--max-tile-bytes` | `OVERTURE_MAX_TILE_BYTES` | `8388608` (8 MiB) |
@@ -108,17 +109,24 @@ memory, CPU, cache, and scratch limits in addition to these application
 limits. `max-tile-rows` is an early rejection bound; `max-tile-bytes` is the
 hard complete compressed-output bound.
 
-Catalog freshness is fail-closed. The poll interval is only an idle refresh;
-each catalog or tile request performs its own bounded check using
-`catalog-timeout`. A detected release or manifest change fences old work and
-returns `409 catalog_changed` where appropriate; an unavailable check returns
-`503` rather than serving stale data. Tile queue/query work is bounded by
-`tile-timeout`, and complete HTTP responses have the `write-timeout` deadline.
+Catalog validation is shared across requests and renewed daily by default,
+using `catalog-timeout` for each complete check. During upstream rate limiting
+or transient outages, the service keeps serving the last validated version for
+an additional `catalog-stale-grace` (24 hours by default), for at most 48 hours
+since successful validation. Retries back off and honor upstream `Retry-After`;
+request traffic cannot force more checks. Set grace to `0s` to disable it.
+Malformed catalogs and observed release or manifest changes immediately fence
+old work; invalid replacement catalogs return `503`, and version mismatches
+return `409 catalog_changed`. Startup always requires successful validation.
+Tile queue/query work is bounded by `tile-timeout`, and complete HTTP responses
+have the `write-timeout` deadline.
+
 Successful tile responses use `Cache-Control: no-cache, must-revalidate` and
 304 responses are evaluated only after freshness validation.
 
 Requests for the same tile share one build. Running builds finish caching even
-if every client disconnects; abandoned queued jobs are discarded. Smaller tiles
+if every client disconnects; catalog changes or validation expiry cancel them.
+Abandoned queued jobs are discarded. Smaller tiles
 can be derived locally when a complete covering set of compatible larger tiles
 is cached, including boundary neighbors; otherwise the service queries upstream.
 

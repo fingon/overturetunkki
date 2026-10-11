@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -496,6 +497,29 @@ func TestValidateBBox(t *testing.T) {
 				return
 			}
 			assert.ErrorContains(t, err, test.message)
+		})
+	}
+}
+
+func TestManagerPreservesRetryAfterErrors(t *testing.T) {
+	cases := []struct{ name, retryAfter string }{
+		{name: "seconds", retryAfter: "7200"},
+		{name: "date", retryAfter: time.Now().Add(2 * time.Hour).UTC().Format(http.TimeFormat)},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCatalogFixtureServer(t)
+			fixture.server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Retry-After", test.retryAfter)
+				writer.WriteHeader(http.StatusTooManyRequests)
+			})
+			manager, err := New(fixture.options())
+			assert.NilError(t, err)
+			_, err = manager.Refresh(t.Context())
+			var upstreamErr *UpstreamError
+			assert.Assert(t, errors.As(err, &upstreamErr))
+			assert.Equal(t, upstreamErr.StatusCode, http.StatusTooManyRequests)
+			assert.Assert(t, upstreamErr.RetryAt.After(time.Now().Add(time.Hour)))
 		})
 	}
 }

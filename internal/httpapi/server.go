@@ -23,29 +23,30 @@ import (
 )
 
 const (
-	contentTypeJSON            = "application/json; charset=utf-8"
-	contentTypeParquet         = "application/vnd.apache.parquet"
-	cacheControlFresh          = "no-cache, must-revalidate"
-	releaseHeader              = "Overture-Release"
-	catalogVersionHeader       = "Overture-Catalog-Version"
-	projectionHeader           = "Overture-Projection-ID"
-	requestIDHeader            = "X-Request-ID"
-	retryAfterSeconds          = "1"
-	defaultTileConcurrency     = 2
-	defaultWriteTimeout        = 30 * time.Second
-	tileDigestPrefix           = "sha256:"
-	capacityUnavailableCode    = "capacity_unavailable"
-	capacityUnavailableMessage = "tile capacity is unavailable"
-	internalErrorCode          = "internal_error"
-	invalidRequestCode         = "invalid_request"
-	catalogUnavailableCode     = "catalog_unavailable"
-	catalogUnavailableMessage  = "catalog is unavailable"
-	catalogChangedCode         = "catalog_changed"
-	catalogPath                = "/v1/catalog"
-	statusField                = "status"
-	methodNotAllowedMessage    = "method must be GET"
-	serverShuttingDownCode     = "server_shutting_down"
-	serverShuttingDownMessage  = "HTTP server is shutting down"
+	catalogChangedBeforeResponseMessage = "catalog changed before response"
+	contentTypeJSON                     = "application/json; charset=utf-8"
+	contentTypeParquet                  = "application/vnd.apache.parquet"
+	cacheControlFresh                   = "no-cache, must-revalidate"
+	releaseHeader                       = "Overture-Release"
+	catalogVersionHeader                = "Overture-Catalog-Version"
+	projectionHeader                    = "Overture-Projection-ID"
+	requestIDHeader                     = "X-Request-ID"
+	retryAfterSeconds                   = "1"
+	defaultTileConcurrency              = 2
+	defaultWriteTimeout                 = 30 * time.Second
+	tileDigestPrefix                    = "sha256:"
+	capacityUnavailableCode             = "capacity_unavailable"
+	capacityUnavailableMessage          = "tile capacity is unavailable"
+	internalErrorCode                   = "internal_error"
+	invalidRequestCode                  = "invalid_request"
+	catalogUnavailableCode              = "catalog_unavailable"
+	catalogUnavailableMessage           = "catalog is unavailable"
+	catalogChangedCode                  = "catalog_changed"
+	catalogPath                         = "/v1/catalog"
+	statusField                         = "status"
+	methodNotAllowedMessage             = "method must be GET"
+	serverShuttingDownCode              = "server_shutting_down"
+	serverShuttingDownMessage           = "HTTP server is shutting down"
 )
 
 var ErrServerShuttingDown = errors.New(serverShuttingDownMessage)
@@ -53,10 +54,12 @@ var ErrServerShuttingDown = errors.New(serverShuttingDownMessage)
 type CatalogObserver interface {
 	Refresh(context.Context) (catalog.Snapshot, error)
 	Current() (catalog.Generation, error)
+	WithCurrent(func(catalog.Generation)) error
+	State() catalog.State
 }
 
 type TileProvider interface {
-	Get(context.Context, catalog.Snapshot, h3.Cell) (Tile, error)
+	Get(context.Context, catalog.Generation, h3.Cell) (Tile, error)
 }
 
 type Tile struct {
@@ -410,8 +413,32 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		return
 	}
 	defer server.releaseTile(admissionKey)
-	tile, err := server.provider.Get(request.Context(), snapshot, cell)
+	generation, err := server.observer.Current()
 	if err != nil {
+		slog.Warn("catalog generation unavailable before tile build", "error", err)
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
+		return
+	}
+	if generation.Snapshot.CatalogVersion != snapshot.CatalogVersion {
+		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog changed before build", Release: generation.Snapshot.Release, CatalogVersion: generation.Snapshot.CatalogVersion})
+		return
+	}
+	buildContext, cancelBuild := context.WithCancel(request.Context())
+	stopGenerationCancellation := context.AfterFunc(generation.Context, cancelBuild)
+	defer stopGenerationCancellation()
+	defer cancelBuild()
+	tile, err := server.provider.Get(buildContext, generation, cell)
+	if err != nil {
+		if generation.Context.Err() != nil {
+			current, currentErr := server.observer.Current()
+			if currentErr != nil {
+				slog.Warn("catalog generation fenced during tile build", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", currentErr)
+				writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
+			} else {
+				writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: catalogChangedBeforeResponseMessage, Release: current.Snapshot.Release, CatalogVersion: current.Snapshot.CatalogVersion})
+			}
+			return
+		}
 		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
 		if errors.Is(err, cache.ErrCapacityUnavailable) {
 			server.capacityRejects.Add(1)
@@ -434,13 +461,14 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	if latest.CatalogVersion != snapshot.CatalogVersion || latest.Release != snapshot.Release {
 		closeTileReader(request, tile)
 		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
-		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog changed before response", Release: latest.Release, CatalogVersion: latest.CatalogVersion})
+		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: catalogChangedBeforeResponseMessage, Release: latest.Release, CatalogVersion: latest.CatalogVersion})
 		return
 	}
-	server.serveTileFile(responseWriter, request, snapshot, tile)
+	server.serveTileFile(responseWriter, request, generation, tile)
 }
 
-func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request *http.Request, snapshot catalog.Snapshot, tile Tile) {
+func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request *http.Request, generation catalog.Generation, tile Tile) {
+	snapshot := generation.Snapshot
 	if tile.Path == "" || tile.SizeBytes <= 0 || !validTileDigest(tile.Digest) {
 		closeTileReader(request, tile)
 		slog.Error("tile metadata is invalid", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "size_bytes", tile.SizeBytes)
@@ -492,16 +520,33 @@ func (server *Server) serveTileFile(responseWriter http.ResponseWriter, request 
 		}()
 	}
 	etag := `"` + tile.Digest + `"`
-	server.writeVersionHeaders(responseWriter, snapshot)
-	responseWriter.Header().Set("Content-Type", contentTypeParquet)
-	responseWriter.Header().Set("Content-Length", strconv.FormatInt(tile.SizeBytes, 10))
-	responseWriter.Header().Set("ETag", etag)
-	responseWriter.Header().Set("Cache-Control", cacheControlFresh)
-	if etagMatches(request.Header.Get("If-None-Match"), etag) {
-		responseWriter.WriteHeader(http.StatusNotModified)
+	stream := false
+	err = server.observer.WithCurrent(func(current catalog.Generation) {
+		if current.Number != generation.Number || current.Snapshot.CatalogVersion != snapshot.CatalogVersion {
+			writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: catalogChangedBeforeResponseMessage, Release: current.Snapshot.Release, CatalogVersion: current.Snapshot.CatalogVersion})
+			return
+		}
+		server.writeVersionHeaders(responseWriter, snapshot)
+		responseWriter.Header().Set("Content-Type", contentTypeParquet)
+		responseWriter.Header().Set("Content-Length", strconv.FormatInt(tile.SizeBytes, 10))
+		responseWriter.Header().Set("ETag", etag)
+		responseWriter.Header().Set("Cache-Control", cacheControlFresh)
+		if etagMatches(request.Header.Get("If-None-Match"), etag) {
+			responseWriter.WriteHeader(http.StatusNotModified)
+			return
+		}
+		responseWriter.WriteHeader(http.StatusOK)
+		stream = true
+	})
+	if err != nil {
+		slog.Warn("catalog generation unavailable before tile headers", "error", err)
+		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 		return
 	}
-	responseWriter.WriteHeader(http.StatusOK)
+	if !stream {
+		return
+	}
+
 	if _, err := io.CopyN(responseWriter, file, tile.SizeBytes); err != nil {
 		slog.Error("stream tile response", "request_id", request.Header.Get(requestIDHeader), "path", tile.Path, "error", err)
 	}
@@ -564,7 +609,12 @@ func (server *Server) serveMetrics(responseWriter http.ResponseWriter, request *
 	}
 	responseWriter.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	responseWriter.WriteHeader(http.StatusOK)
-	_, err := fmt.Fprintf(responseWriter, "# TYPE overture_http_requests_total counter\noverture_http_requests_total %d\n# TYPE overture_http_catalog_requests_total counter\noverture_http_catalog_requests_total %d\n# TYPE overture_http_tile_requests_total counter\noverture_http_tile_requests_total %d\n# TYPE overture_http_errors_4xx_total counter\noverture_http_errors_4xx_total %d\n# TYPE overture_http_errors_5xx_total counter\noverture_http_errors_5xx_total %d\n# TYPE overture_http_capacity_rejections_total counter\noverture_http_capacity_rejections_total %d\n# TYPE overture_catalog_ready gauge\noverture_catalog_ready %d\n", server.requests.Load(), server.catalogRequests.Load(), server.tileRequests.Load(), server.error4xx.Load(), server.error5xx.Load(), server.capacityRejects.Load(), ready)
+	state := server.observer.State()
+	lastSuccessSec := int64(0)
+	if !state.LastSuccess.IsZero() {
+		lastSuccessSec = state.LastSuccess.Unix()
+	}
+	_, err := fmt.Fprintf(responseWriter, "# TYPE overture_http_requests_total counter\noverture_http_requests_total %d\n# TYPE overture_http_catalog_requests_total counter\noverture_http_catalog_requests_total %d\n# TYPE overture_http_tile_requests_total counter\noverture_http_tile_requests_total %d\n# TYPE overture_http_errors_4xx_total counter\noverture_http_errors_4xx_total %d\n# TYPE overture_http_errors_5xx_total counter\noverture_http_errors_5xx_total %d\n# TYPE overture_http_capacity_rejections_total counter\noverture_http_capacity_rejections_total %d\n# TYPE overture_catalog_ready gauge\noverture_catalog_ready %d\n# TYPE overture_catalog_last_success_timestamp_seconds gauge\noverture_catalog_last_success_timestamp_seconds %d\n# TYPE overture_catalog_refresh_successes_total counter\noverture_catalog_refresh_successes_total %d\n# TYPE overture_catalog_refresh_failures_total counter\noverture_catalog_refresh_failures_total %d\n", server.requests.Load(), server.catalogRequests.Load(), server.tileRequests.Load(), server.error4xx.Load(), server.error5xx.Load(), server.capacityRejects.Load(), ready, lastSuccessSec, state.RefreshSuccesses, state.RefreshFailures)
 	if err != nil {
 		slog.Error("write metrics response", "request_id", request.Header.Get(requestIDHeader), "error", err)
 	}

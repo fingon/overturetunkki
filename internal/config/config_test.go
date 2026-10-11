@@ -21,6 +21,7 @@ func TestParseDefaults(t *testing.T) {
 	assert.Equal(t, cfg.CatalogHost, "stac.overturemaps.org")
 	assert.Equal(t, cfg.AssetHost, "overturemaps-us-west-2.s3.us-west-2.amazonaws.com")
 	assert.Equal(t, cfg.CatalogPollInterval, DefaultCatalogPollInterval)
+	assert.Equal(t, cfg.CatalogStaleGrace, DefaultCatalogStaleGrace)
 	assert.Equal(t, cfg.CatalogTimeout, DefaultCatalogTimeout)
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names", "basic_category"})
 	assert.Equal(t, cfg.MinTileResolution, DefaultMinTileResolution)
@@ -49,6 +50,7 @@ func TestParseCommandLineOverrides(t *testing.T) {
 		"--catalog-host=localhost:8081",
 		"--asset-host=localhost:8081",
 		"--catalog-poll-interval=2m",
+		"--catalog-stale-grace=3m",
 		"--catalog-timeout=11s",
 		"--fields=id,geometry,names",
 		"--max-tile-bytes=1000",
@@ -77,6 +79,7 @@ func TestParseCommandLineOverrides(t *testing.T) {
 	assert.Equal(t, cfg.CatalogHost, "localhost:8081")
 	assert.Equal(t, cfg.AssetHost, "localhost:8081")
 	assert.Equal(t, cfg.CatalogPollInterval, 2*time.Minute)
+	assert.Equal(t, cfg.CatalogStaleGrace, 3*time.Minute)
 	assert.Equal(t, cfg.CatalogTimeout, 11*time.Second)
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names"})
 	assert.Equal(t, cfg.MaxTileBytes, int64(1000))
@@ -97,6 +100,7 @@ func TestParseCommandLineOverrides(t *testing.T) {
 }
 
 func TestParseEnvironmentOverrides(t *testing.T) {
+	t.Setenv("OVERTURE_CATALOG_STALE_GRACE", "0s")
 	t.Setenv("OVERTURE_MODE", "worker")
 	t.Setenv("OVERTURE_LISTEN", ":9091")
 	t.Setenv("OVERTURE_FIELDS", "id,geometry,names")
@@ -111,6 +115,7 @@ func TestParseEnvironmentOverrides(t *testing.T) {
 	if err != nil {
 		return
 	}
+	assert.Equal(t, cfg.CatalogStaleGrace, time.Duration(0))
 	assert.Equal(t, cfg.Mode, ModeWorker)
 	assert.Equal(t, cfg.Listen, ":9091")
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names"})
@@ -156,6 +161,8 @@ func TestValidate(t *testing.T) {
 		{name: "nonpositive limit", mutate: func(cfg *Config) { cfg.MaxTileBytes = 0 }, message: "max-tile-bytes"},
 		{name: "cache smaller than tile", mutate: func(cfg *Config) { cfg.CacheMaxBytes = cfg.MaxTileBytes - 1 }, message: "smaller"},
 		{name: "workers exceed scratch", mutate: func(cfg *Config) { cfg.WorkerCount = cfg.ScratchMaxBytes/cfg.MaxTileBytes + 1 }, message: "scratch capacity"},
+		{name: "negative catalog grace", mutate: func(cfg *Config) { cfg.CatalogStaleGrace = -time.Second }, message: "catalog-stale-grace"},
+		{name: "catalog window overflow", mutate: func(cfg *Config) { cfg.CatalogPollInterval = time.Duration(1<<63 - 1) }, message: "catalog-stale-grace"},
 		{name: "empty fields", mutate: func(cfg *Config) { cfg.Fields = nil }, message: "fields must not be empty"},
 		{name: "unsupported field", mutate: func(cfg *Config) { cfg.Fields = []string{"id", "geometry", "unknown"} }, message: "not supported"},
 		{name: "duplicate field", mutate: func(cfg *Config) { cfg.Fields = []string{"id", "geometry", "geometry"} }, message: "repeated"},

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -29,9 +30,25 @@ type ObservedChecker interface {
 	RefreshObserved(context.Context, func(Observation)) (Snapshot, error)
 }
 
+const (
+	catalogRetryBase          = time.Minute
+	catalogRetryMax           = time.Hour
+	catalogRetryJitterDivisor = 5
+)
+
+type ObserverOptions struct {
+	PollInterval time.Duration
+	StaleGrace   time.Duration
+	Now          func() time.Time
+}
+
 type Observer struct {
 	checker      Checker
 	pollInterval time.Duration
+	staleGrace   time.Duration
+	now          func() time.Time
+	retryBase    time.Duration
+	wake         chan struct{}
 
 	mu       sync.Mutex
 	runMu    sync.Mutex
@@ -41,14 +58,19 @@ type Observer struct {
 }
 
 type observerState struct {
-	ready         bool
-	generation    uint64
-	snapshot      Snapshot
-	identity      Observation
-	pending       Observation
-	lastError     error
-	activeContext context.Context
-	cancelActive  context.CancelFunc
+	lastSuccess         time.Time
+	nextCheck           time.Time
+	failures            uint64
+	successes           uint64
+	consecutiveFailures int
+	ready               bool
+	generation          uint64
+	snapshot            Snapshot
+	identity            Observation
+	pending             Observation
+	lastError           error
+	activeContext       context.Context
+	cancelActive        context.CancelFunc
 }
 
 type observationCall struct {
@@ -58,10 +80,13 @@ type observationCall struct {
 }
 
 type State struct {
-	Ready      bool
-	Generation uint64
-	Snapshot   Snapshot
-	Err        error
+	LastSuccess      time.Time
+	RefreshSuccesses uint64
+	RefreshFailures  uint64
+	Ready            bool
+	Generation       uint64
+	Snapshot         Snapshot
+	Err              error
 }
 
 type Generation struct {
@@ -70,14 +95,23 @@ type Generation struct {
 	Context  context.Context
 }
 
-func NewObserver(checker Checker, pollInterval time.Duration) (*Observer, error) {
+func NewObserver(checker Checker, options ObserverOptions) (*Observer, error) {
 	if checker == nil {
 		return nil, errors.New("catalog checker is nil")
 	}
-	if pollInterval <= 0 {
+	if options.PollInterval <= 0 {
 		return nil, errors.New("catalog poll interval must be positive")
 	}
-	return &Observer{checker: checker, pollInterval: pollInterval}, nil
+	if options.StaleGrace < 0 || options.StaleGrace > time.Duration(1<<63-1)-options.PollInterval {
+		return nil, errors.New("catalog stale grace must be nonnegative and fit with poll interval")
+	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	return &Observer{
+		checker: checker, pollInterval: options.PollInterval, staleGrace: options.StaleGrace,
+		now: options.Now, retryBase: catalogRetryBase, wake: make(chan struct{}, 1),
+	}, nil
 }
 
 func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
@@ -92,17 +126,32 @@ func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 	}
 
 	o.mu.Lock()
+	now := o.now()
+	o.expireLocked(now)
+	if o.state.ready && now.Before(o.state.lastSuccess.Add(o.pollInterval)) {
+		snapshot := cloneSnapshot(o.state.snapshot)
+		o.mu.Unlock()
+		return snapshot, nil
+	}
 	call := o.inFlight
-	if call == nil {
+	if call == nil && !now.Before(o.state.nextCheck) {
 		call = &observationCall{done: make(chan struct{})}
 		o.inFlight = call
 		o.state.pending = Observation{}
 		checkContext, cancel := detachedCheckContext(ctx)
-		o.mu.Unlock()
 		go o.runCheck(checkContext, call, cancel)
-	} else {
-		o.mu.Unlock()
 	}
+	if o.state.ready {
+		snapshot := cloneSnapshot(o.state.snapshot)
+		o.mu.Unlock()
+		return snapshot, nil
+	}
+	if call == nil {
+		err := fmt.Errorf("%w: %w", ErrCatalogUnavailable, o.state.lastError)
+		o.mu.Unlock()
+		return Snapshot{}, err
+	}
+	o.mu.Unlock()
 
 	select {
 	case <-call.done:
@@ -138,23 +187,47 @@ func (o *Observer) Run(ctx context.Context) error {
 		o.runMu.Unlock()
 	}()
 
-	if _, err := o.Refresh(ctx); err != nil && ctx.Err() == nil {
-		slog.Error("initial catalog check failed", "error", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return observerStopError(err)
-	}
-	ticker := time.NewTicker(o.pollInterval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return observerStopError(ctx.Err())
-		case <-ticker.C:
-			if _, err := o.Refresh(ctx); err != nil && ctx.Err() == nil {
-				slog.Error("idle catalog check failed", "error", err)
+		if _, err := o.Refresh(ctx); err != nil && ctx.Err() == nil {
+			slog.Debug("catalog remains unavailable", "error", err)
+		}
+		o.mu.Lock()
+		o.expireLocked(o.now())
+		next := o.state.nextCheck
+		if o.inFlight != nil {
+			next = o.now().Add(o.pollInterval)
+		}
+		if o.state.ready {
+			expiry := o.state.lastSuccess.Add(o.pollInterval + o.staleGrace)
+			if expiry.Before(next) {
+				next = expiry
 			}
 		}
+		call := o.inFlight
+		o.mu.Unlock()
+		delay := max(next.Sub(o.now()), time.Millisecond)
+		timer := time.NewTimer(delay)
+		var done <-chan struct{}
+		if call != nil {
+			done = call.done
+		}
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return observerStopError(ctx.Err())
+		case <-done:
+		case <-o.wake:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+}
+
+func (o *Observer) expireLocked(now time.Time) {
+	if o.state.ready && !now.Before(o.state.lastSuccess.Add(o.pollInterval+o.staleGrace)) {
+		o.fenceLocked()
+		o.state.lastError = errors.New("catalog validation expired")
+		slog.Warn("catalog validation grace expired", "last_success", o.state.lastSuccess)
 	}
 }
 
@@ -164,7 +237,9 @@ func (o *Observer) State() State {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.expireLocked(o.now())
 	return State{
+		LastSuccess: o.state.lastSuccess, RefreshSuccesses: o.state.successes, RefreshFailures: o.state.failures,
 		Ready:      o.state.ready,
 		Generation: o.state.generation,
 		Snapshot:   cloneSnapshot(o.state.snapshot),
@@ -182,6 +257,7 @@ func (o *Observer) Current() (Generation, error) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.expireLocked(o.now())
 	if !o.state.ready {
 		if o.state.lastError != nil {
 			return Generation{}, fmt.Errorf("%w: %w", ErrCatalogUnavailable, o.state.lastError)
@@ -193,6 +269,21 @@ func (o *Observer) Current() (Generation, error) {
 		Snapshot: cloneSnapshot(o.state.snapshot),
 		Context:  o.state.activeContext,
 	}, nil
+}
+
+// WithCurrent holds the publication lock through publish; the callback must not call observer methods.
+func (o *Observer) WithCurrent(publish func(Generation)) error {
+	if o == nil || publish == nil {
+		return errors.New("catalog publication requires observer and callback")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.expireLocked(o.now())
+	if !o.state.ready {
+		return fmt.Errorf("%w: catalog generation is not ready", ErrCatalogUnavailable)
+	}
+	publish(Generation{Number: o.state.generation, Snapshot: cloneSnapshot(o.state.snapshot), Context: o.state.activeContext})
+	return nil
 }
 
 func (o *Observer) runCheck(ctx context.Context, call *observationCall, cancel context.CancelFunc) {
@@ -241,16 +332,49 @@ func (o *Observer) finishCheck(call *observationCall, snapshot Snapshot, err err
 			o.acceptObservationLocked(snapshot, observation)
 		}
 	}
+	now := o.now()
 	if err != nil {
-		o.fenceLocked()
+		o.state.failures++
+		o.state.consecutiveFailures++
+		delay := o.retryDelayLocked()
+		o.state.nextCheck = now.Add(delay)
+		var upstreamErr *UpstreamError
+		if errors.As(err, &upstreamErr) && upstreamErr.RetryAt.After(o.state.nextCheck) {
+			o.state.nextCheck = upstreamErr.RetryAt
+		}
+		o.expireLocked(now)
+		if !isTransientError(err) {
+			o.fenceLocked()
+		}
 		o.state.lastError = err
+		slog.Warn("catalog validation failed", "error", err, "next_check", o.state.nextCheck,
+			"serving_grace", o.state.ready, "catalog_version", o.state.snapshot.CatalogVersion)
+	} else {
+		o.state.successes++
+		o.state.consecutiveFailures = 0
+		o.state.lastSuccess = now
+		o.state.nextCheck = now.Add(o.pollInterval)
+		slog.Debug("catalog validation succeeded", "catalog_version", snapshot.CatalogVersion, "next_check", o.state.nextCheck)
 	}
+
 	call.snapshot = cloneSnapshot(snapshot)
 	call.err = err
 	if o.inFlight == call {
 		o.inFlight = nil
 	}
 	close(call.done)
+	select {
+	case o.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (o *Observer) retryDelayLocked() time.Duration {
+	delay := o.retryBase
+	for attempt := 1; attempt < o.state.consecutiveFailures && delay < catalogRetryMax; attempt++ {
+		delay = min(delay*2, catalogRetryMax)
+	}
+	return min(delay+time.Duration(1+rand.Int64N(max(int64(delay/catalogRetryJitterDivisor), 1))), catalogRetryMax)
 }
 
 func (o *Observer) validateObservationLocked(observation Observation) error {

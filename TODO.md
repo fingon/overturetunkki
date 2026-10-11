@@ -44,7 +44,12 @@ items below are completed;
   conditional requests, canonical version/projection hashes, and schema checks.
 - [x] Implement serialized observations, overlapping-check coalescing, idle
   polling, startup readiness, generation fencing before replacement validation,
-  cancellation of old jobs, and fail-closed behavior on check failures.
+  cancellation of old jobs, and immediate fencing on invalid catalogs.
+- [x] Share daily catalog validation across requests, allow an additional
+  24-hour transient-outage grace, honor Retry-After with exponential retry
+  backoff, and enforce expiry and generation identity before tile headers.
+  Expose refresh outcomes and last-success time; test cooldown, expiry,
+  recovery, and same-release manifest changes during renewal.
 - [x] Test rollover on cache hits, during build and before headers; unavailable
   and malformed catalogs; unsupported schemas; same-release manifest changes;
   rollback observations; and stale persisted startup state.

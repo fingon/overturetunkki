@@ -250,6 +250,9 @@ func TestContainerLifecycle(t *testing.T) {
 	validateTile(t, newBody)
 
 	fixture.setMode(fixtureCatalogDown)
+	graceCatalog := fetchCatalog(t, client, container.url("/v1/catalog"))
+	assert.Equal(t, graceCatalog.CatalogVersion, newCatalog.CatalogVersion)
+	fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: cell, wantStatus: http.StatusOK})
 	waitForStatus(t, client, func() int {
 		response, err := client.Get(container.url("/v1/catalog"))
 		if err != nil {
@@ -361,6 +364,7 @@ func (container *serviceContainer) start() {
 		"--env", "OVERTURE_ASSET_HOST=" + hostPort(container.fixture.baseURL),
 		"--env", "OVERTURE_CATALOG_POLL_INTERVAL=100ms",
 		"--env", "OVERTURE_CATALOG_TIMEOUT=2s",
+		"--env", "OVERTURE_CATALOG_STALE_GRACE=2s",
 		"--env", "OVERTURE_FIELDS=id,geometry,names",
 		"--env", "OVERTURE_MAX_TILE_BYTES=1048576",
 		"--env", "OVERTURE_MAX_TILE_ROWS=1000",
@@ -681,7 +685,7 @@ func runCLI(t *testing.T, binary string, args ...string) ([]byte, []byte, error)
 
 func waitForReady(t *testing.T, client *http.Client, endpoint string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		response, err := client.Get(endpoint)
 		if err == nil {

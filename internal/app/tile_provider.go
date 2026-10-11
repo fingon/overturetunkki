@@ -122,7 +122,7 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 	return provider, nil
 }
 
-func (provider *tileProvider) Get(ctx context.Context, snapshot catalog.Snapshot, cell h3.Cell) (httpapi.Tile, error) {
+func (provider *tileProvider) Get(ctx context.Context, generation catalog.Generation, cell h3.Cell) (httpapi.Tile, error) {
 	if provider == nil {
 		return httpapi.Tile{}, errors.New("get tile: provider is nil")
 	}
@@ -138,6 +138,13 @@ func (provider *tileProvider) Get(ctx context.Context, snapshot catalog.Snapshot
 	if err := ctx.Err(); err != nil {
 		return httpapi.Tile{}, fmt.Errorf("get tile: %w", err)
 	}
+	if generation.Context == nil {
+		return httpapi.Tile{}, errors.New("get tile: catalog generation context is nil")
+	}
+	if err := generation.Context.Err(); err != nil {
+		return httpapi.Tile{}, fmt.Errorf("get tile: catalog generation canceled: %w", err)
+	}
+	snapshot := generation.Snapshot
 	if err := provider.observeCatalogVersion(snapshot.CatalogVersion); err != nil {
 		return httpapi.Tile{}, err
 	}
@@ -158,7 +165,14 @@ func (provider *tileProvider) Get(ctx context.Context, snapshot catalog.Snapshot
 		return httpapi.Tile{}, err
 	}
 	if err := provider.scheduler.Do(ctx, key, provider.maxBytes, func(buildContext context.Context, reservation *cache.Reservation) error {
-		return provider.build(buildContext, reservation, key, tileBuildOptions{Snapshot: snapshot, Cell: cell})
+		generationBuildContext, cancel := context.WithCancel(buildContext)
+		stopGenerationCancellation := context.AfterFunc(generation.Context, cancel)
+		defer stopGenerationCancellation()
+		defer cancel()
+		if err := generation.Context.Err(); err != nil {
+			return fmt.Errorf("build tile: catalog generation canceled: %w", err)
+		}
+		return provider.build(generationBuildContext, reservation, key, tileBuildOptions{Snapshot: snapshot, Cell: cell})
 	}); err != nil {
 		return httpapi.Tile{}, err
 	}

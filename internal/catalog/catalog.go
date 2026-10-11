@@ -7,12 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -565,6 +568,44 @@ func (m *Manager) assetFromItem(item itemDocument, release string) (Asset, error
 	}, nil
 }
 
+type UpstreamError struct {
+	StatusCode int
+	RetryAt    time.Time
+	URL        string
+}
+
+func (err *UpstreamError) Error() string {
+	return fmt.Sprintf("catalog request %s returned %d", err.URL, err.StatusCode)
+}
+
+func isTransientError(err error) bool {
+	if upstreamErr, ok := errors.AsType[*UpstreamError](err); ok {
+		return upstreamErr.StatusCode == http.StatusTooManyRequests || upstreamErr.StatusCode >= http.StatusInternalServerError
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+func parseRetryAfter(value string, now time.Time) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err == nil && seconds >= 0 && seconds <= int64(time.Duration(1<<63-1)/time.Second) {
+		return now.Add(time.Duration(seconds) * time.Second)
+	}
+	date, err := http.ParseTime(value)
+	if err != nil {
+		slog.Warn("invalid catalog Retry-After header", "value", value, "error", err)
+		return time.Time{}
+	}
+	if date.After(now) {
+		return date
+	}
+	return time.Time{}
+}
+
 func (m *Manager) fetchJSON(ctx context.Context, target *url.URL) ([]byte, error) {
 	if err := validateTrustedURL(target, m.options.CatalogHost, true); err != nil {
 		return nil, err
@@ -602,11 +643,14 @@ func (m *Manager) fetchJSON(ctx context.Context, target *url.URL) ([]byte, error
 		return append([]byte(nil), cached.body...), nil
 	}
 	if response.StatusCode != http.StatusOK {
-		status := response.Status
-		if err := closeResponse(response); err != nil {
-			return nil, fmt.Errorf("catalog request %s returned %s: %w", key, status, err)
+		upstreamErr := &UpstreamError{
+			StatusCode: response.StatusCode, URL: key,
+			RetryAt: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()),
 		}
-		return nil, fmt.Errorf("catalog request %s returned %s", key, status)
+		if err := closeResponse(response); err != nil {
+			return nil, fmt.Errorf("%w; close response: %w", upstreamErr, err)
+		}
+		return nil, upstreamErr
 	}
 	body, err := readResponse(response, m.options.MaxResponseBytes)
 	if err != nil {

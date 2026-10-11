@@ -105,41 +105,55 @@ their resolved metadata, H3 semantics, and the GeoParquet writer revision.
 
 `catalog.Observer` serializes state publication and coalesces overlapping
 refresh callers onto one check; caller cancellation only detaches that caller.
-It performs an immediate startup check and continues bounded idle polling while
-exposing readiness and the current generation. A newly observed release or
-manifest fences the prior generation before replacement validation, canceling
-its generation context. Any failed check also clears readiness and cancels the
-active generation, so callers cannot fall back to a stale snapshot.
+Startup requires a successful complete validation. A successful validation is
+shared by all catalog and tile requests for `catalog-poll-interval` (default
+`24h`), and a background renewal runs when that window expires. Every renewal
+revalidates the root latest pointer and full selected manifest using conditional
+HTTP requests, detecting same-release manifest changes as well as releases.
 
-Freshness is fail closed and checked on every tile request, including cache
-hits, negative hits, conditional requests, and range requests. Fetch the latest
-pointer with cache revalidation, using conditional HTTP requests when upstream
-validators exist. Revalidate the selected manifest as well. Requests may share
-an overlapping in-flight check, but may not reuse a completed check merely
-because it is recent. A background check improves discovery while idle; it does
-not substitute for request checks.
+During the additional `catalog-stale-grace` (default `24h`), requests can use the
+last validated generation while a single background renewal runs. Network
+failures, timeouts, HTTP 429, and upstream 5xx preserve that generation during
+the grace period. Malformed or unsupported catalogs and other upstream HTTP
+errors fence it immediately. Any newly observed release or manifest also fences
+the prior generation before replacement validation; a failed replacement never
+restores the old snapshot. With default settings, validation is usable for at
+most 48 hours since the last successful check. Readiness checks and response
+publication enforce expiry even without a running background poller.
+
+Failed checks retry with exponential backoff starting at one minute, with up to
+20 percent positive jitter and a one-hour cap including jitter. Valid upstream
+`Retry-After` delta-seconds or HTTP dates impose a minimum retry time, even beyond
+the cap. All requests share the retry cooldown, including startup failures;
+success resets the backoff. Zero stale grace requires successful renewal at
+expiry. Negative grace and overflowing freshness-plus-grace durations are
+rejected. Freshness and retry state are per process and are not persisted.
 
 A catalog manager serializes observations and publishes a generation atomically.
 Once it observes a different advertised release or manifest, fence the old
 generation immediately, even if validation of the new schema fails. Cancel old
 builds, invalidate negative entries, and make old disk entries inaccessible.
 Validate new asset paths, schema, selected columns, and geometry before marking
-the new generation ready. Failure returns `503`, never fallback data. A change
-back to an older release is also a new observation, not something to ignore.
+the new generation ready. Failed replacement validation returns `503`, never
+fallback data. A change back to an older release is also a new observation, not
+something to ignore. Queued callers and shared running builds use the captured
+generation context, so fencing cancels obsolete work even after callers detach.
 
-Before sending tile headers, perform another freshness check after a build or
+Before sending tile headers, apply the shared freshness policy after a build or
 queue wait and compare its captured generation under the publication lock.
 Discard obsolete results; return `409 catalog_changed` with the current version
 when known. The same lock protects the final cache-hit generation comparison.
 No old-generation response may begin after a change has been observed locally.
 Already streaming responses retain their original version and may complete.
 No service can promise detection of an upstream change after its last successful
-check; this is a request-validation guarantee, not a global atomic snapshot.
+check; freshness is bounded by the configured validation window, not a global
+atomic snapshot.
 
-Startup is unready until catalog validation succeeds. A failed freshness check
-returns `503 catalog_unavailable`, including on a cache hit. Persisted metadata
-helps recovery but never establishes currentness by itself. Clients must compare
-versions, discard old tiles, and refresh on resuming a session; the server cannot
+Startup is unready until catalog validation succeeds. An expired generation or
+a non-transient validation failure returns `503 catalog_unavailable`, including
+on a cache hit. Persisted metadata helps recovery but never establishes
+currentness by itself. Clients must compare versions, discard old tiles, and
+refresh on resuming a session; the server cannot
 revoke data already downloaded by a client.
 
 Deterministic tests cover unavailable and malformed STAC documents, unsupported
@@ -152,7 +166,7 @@ a request keyed by a newer version.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /v1/catalog` | Revalidate upstream; return release, catalog version, projection ID, selected fields, limits, supported H3 resolutions, and attribution links. |
+| `GET /v1/catalog` | Apply shared catalog freshness; return release, catalog version, projection ID, selected fields, limits, supported H3 resolutions, and attribution links. |
 | `GET /v1/tiles/places/{h3}?catalog_version=...` | Require the expected version; return one complete GeoParquet file or a structured error. |
 | `GET /livez` | Supervisor is running. |
 | `GET /readyz` | Catalog ready, workers healthy, cache writable, and resources available. |
@@ -192,7 +206,8 @@ of distinct tiles (`TileConcurrency`, default 2), and duplicate requests share
 a slot; saturation for a different tile returns
 `503 capacity_unavailable` with `Retry-After: 1`. The metrics endpoint exposes
 only fixed-cardinality counters for total, catalog, tile, 4xx, 5xx, and
-capacity-rejection requests, plus catalog readiness. Complete tile responses
+capacity-rejection requests, plus catalog readiness, last successful validation
+Unix timestamp, and refresh success/failure counters. Complete tile responses
 set a `30s` write deadline by default, configurable through `WriteTimeout`.
 Shutdown rejects new requests, waits for accepted handlers to finish, and
 returns the caller's deadline error if draining does not complete in time.
@@ -495,7 +510,7 @@ Coalesce simultaneous requests for the same key into one build. Bound workers
 and the waiting queue; return `503` when full. Caller cancellation detaches that
 caller. Discard queued work when no callers remain; after dequeue (including
 reservation acquisition), finish work even without callers. Cancel running work
-on shutdown or worker deadline. HTTP admission counts distinct
+on catalog fencing/expiry, shutdown, or worker deadline. HTTP admission counts distinct
 `(catalog_version, projection_id, cell)` requests up to `worker_count`; callers
 for an already admitted tile share its slot until their final handler finishes.
 Each scheduled build rechecks positive and negative caches before starting
@@ -563,7 +578,8 @@ These defaults are starting points to validate with representative POIs.
 | `--catalog-url` | `https://stac.overturemaps.org/catalog.json` | Trusted catalog endpoint. |
 | `--catalog-host` | `stac.overturemaps.org` | Exact trusted catalog host, including an optional test port. |
 | `--asset-host` | `overturemaps-us-west-2.s3.us-west-2.amazonaws.com` | Exact trusted places asset host, including an optional test port. |
-| `--catalog-poll-interval` | `1m` | Additional idle refresh. |
+| `--catalog-poll-interval` | `24h` | Shared catalog freshness and background renewal interval. |
+| `--catalog-stale-grace` | `24h` | Additional serving time during transient catalog failures; zero disables grace. |
 | `--catalog-timeout` | `10s` | Deadline for a complete freshness check. |
 | `--fields` | `id,geometry,names,basic_category` | Output projection. |
 | `--max-tile-bytes` | `8388608` | Maximum complete zstd Parquet size, 8 MiB. |
