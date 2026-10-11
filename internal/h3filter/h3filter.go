@@ -56,14 +56,6 @@ func CellBounds(cell h3.Cell) (Bounds, error) {
 		return Bounds{}, fmt.Errorf("cell %d is invalid: %w", uint64(cell), h3.ErrCellInvalid)
 	}
 
-	faces, err := cell.IcosahedronFaces()
-	if err != nil {
-		return Bounds{}, fmt.Errorf("find icosahedron faces for cell %s: %w", cell, err)
-	}
-	if cell.IsPentagon() || len(faces) != 1 {
-		return GlobalBounds(), nil
-	}
-
 	center, err := h3.CellToLatLng(cell)
 	if err != nil {
 		return Bounds{}, fmt.Errorf("find center for cell %s: %w", cell, err)

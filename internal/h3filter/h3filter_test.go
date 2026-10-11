@@ -15,7 +15,10 @@ import (
 	"gotest.tools/v3/assert"
 )
 
-const syntheticPointCount = 50_000
+const (
+	syntheticPointCount      = 50_000
+	reportedFaceCrossingCell = "85194db3fffffff"
+)
 
 type membershipCase struct {
 	name          string
@@ -163,11 +166,24 @@ func TestCellBoundsAreConservative(t *testing.T) {
 		cell h3.Cell
 	}{
 		{name: "ordinary cell", cell: normalCell},
-		{name: "pentagon", cell: pentagons[0]},
+		{name: testCoverageFaceCrossing, cell: h3.CellFromString(reportedFaceCrossingCell)},
+		{name: "face crossing neighbor", cell: h3.CellFromString("85194da3fffffff")},
+		{name: "face crossing neighbor west", cell: h3.CellFromString("851fa4dbfffffff")},
+		{name: testCoveragePentagon, cell: pentagons[0]},
 		{name: "pole", cell: poleCell},
 		{name: "antimeridian", cell: antimeridianCell},
 	}
 
+	for resolution := 0; resolution <= h3.MaxResolution; resolution++ {
+		pentagons, err := h3.Pentagons(resolution)
+		assert.NilError(t, err)
+		for _, cell := range pentagons {
+			cases = append(cases, struct {
+				name string
+				cell h3.Cell
+			}{name: "pentagon_" + cell.String(), cell: cell})
+		}
+	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			bounds, err := CellBounds(test.cell)
@@ -203,8 +219,11 @@ func TestCellBoundsAreConservative(t *testing.T) {
 				}
 			}
 
-			if test.name == "pentagon" {
-				assert.Assert(t, bounds.IsGlobal())
+			assert.Assert(t, !bounds.IsGlobal())
+			if strings.HasPrefix(test.name, "face crossing") {
+				assert.Assert(t, bounds.LatitudeMaxDeg-bounds.LatitudeMinDeg < 1)
+				assert.Equal(t, len(bounds.LongitudeIntervals), 1)
+				assert.Assert(t, bounds.LongitudeIntervals[0].MaxDeg-bounds.LongitudeIntervals[0].MinDeg < 1)
 			}
 			if test.name == "antimeridian" {
 				assert.Equal(t, len(bounds.LongitudeIntervals), 2)
@@ -256,7 +275,7 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 	if err != nil {
 		return
 	}
-	cells = append(cells, pentagons[0])
+	cells = append(cells, pentagons[0], h3.CellFromString(reportedFaceCrossingCell))
 
 	points := make([]syntheticPoint, 0, len(cells)*8+1)
 	pointID := syntheticPointCount + 1
@@ -326,7 +345,7 @@ func TestBBoxPruningMatchesUnprunedMembership(t *testing.T) {
 				return
 			}
 			predicate, predicateArgs := bounds.DuckDBBBoxPredicate()
-			if index == 0 {
+			if index == 0 || cell.String() == reportedFaceCrossingCell {
 				assertParquetPredicatePushdown(t, membershipQuery{connection: connection, predicate: predicate, predicateArgs: predicateArgs, cell: cell})
 			}
 			unpruned := queryIDs(t, membershipQuery{connection: connection, predicate: bboxValidSQL, cell: cell})

@@ -299,11 +299,13 @@ Use conservative cell bounds to push predicates into Overture `bbox` columns
 before exact H3 evaluation. Account for curved edges, pentagons, poles, and the
 antimeridian; split wrapped longitude intervals. Where conservative bounds
 cannot be proved, scan a broader region rather than drop features. Bounds are
-an optimization and never the membership rule. Ordinary single-face cells use
-a spherical-cap envelope around the H3 center, expanded by the greatest
+an optimization and never the membership rule. All cells, including pentagons
+and cells spanning multiple icosahedron faces, use a spherical-cap envelope
+around the H3 center, expanded by the greatest
 center-to-vertex distance, one greatest boundary-edge distance, and a floating-
-point margin. Pentagon cells, cells spanning multiple icosahedron faces, and
-pole-crossing caps use a global longitude range or a global envelope. The
+point margin. The complete boundary includes vertices inserted at face
+crossings. Pole-crossing caps retain their latitude bounds and use a global
+longitude range; only a cap covering the globe uses a global envelope. The
 generated DuckDB predicate excludes NULL, non-finite, out-of-range, and
 reversed-latitude source bboxes. Tiles cover only the valid-bbox subset.
 Wrapped longitudes remain supported. There is no full-source fallback scan
@@ -311,8 +313,8 @@ for malformed bboxes.
 
 The table-driven integration test compares selected IDs from pruned and
 unpruned DuckDB queries over 50,000 deterministic point bboxes plus centers and
-boundary vertices for ordinary, pentagon, polar, and antimeridian cells. It
-also covers wrapped bboxes and verifies NULL/malformed bbox exclusion.
+boundary vertices for ordinary, face-crossing, pentagon, polar, and antimeridian
+cells. It also covers wrapped bboxes and verifies NULL/malformed bbox exclusion.
 The unpruned reference is restricted to valid bboxes. Run the performance
 comparison with:
 

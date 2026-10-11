@@ -12,18 +12,24 @@ import (
 const (
 	testCoverageOrdinary     = "ordinary"
 	testCoverageAntimeridian = "antimeridian"
+	testCoverageFaceCrossing = "face crossing"
+	testCoveragePentagon     = "pentagon"
 )
 
 func TestCoveringCellsIncludesDirectMembership(t *testing.T) {
+	pentagons, err := h3.Pentagons(9)
+	assert.NilError(t, err)
 	for _, test := range []struct {
-		name                      string
-		latitudeDeg, longitudeDeg float64
+		name string
+		cell h3.Cell
 	}{
-		{name: testCoverageOrdinary, latitudeDeg: 37.775938728915946, longitudeDeg: -122.41795063018799},
-		{name: testCoverageAntimeridian, latitudeDeg: 0, longitudeDeg: 179.9999},
+		{name: testCoverageOrdinary, cell: mustCell(t, 37.775938728915946, -122.41795063018799, 9)},
+		{name: testCoverageAntimeridian, cell: mustCell(t, 0, 179.9999, 9)},
+		{name: testCoverageFaceCrossing, cell: h3.CellFromString(reportedFaceCrossingCell)},
+		{name: testCoveragePentagon, cell: pentagons[0]},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cell := mustCell(t, test.latitudeDeg, test.longitudeDeg, 9)
+			cell := test.cell
 			bounds, err := CellBounds(cell)
 			assert.NilError(t, err)
 			assert.Assert(t, !bounds.IsGlobal())
@@ -59,13 +65,9 @@ func TestCoveringCellsIncludesDirectMembership(t *testing.T) {
 }
 
 func TestCoveringCellsUnsafeBoundsAndInvalidInput(t *testing.T) {
-	pentagons, err := h3.Pentagons(9)
+	cover, err := CoveringCells(mustCell(t, 90, 0, 9), 8)
 	assert.NilError(t, err)
-	for _, cell := range []h3.Cell{pentagons[0], mustCell(t, 90, 0, 9)} {
-		cover, coverErr := CoveringCells(cell, 8)
-		assert.NilError(t, coverErr)
-		assert.Equal(t, len(cover), 0)
-	}
+	assert.Equal(t, len(cover), 0)
 	cell := mustCell(t, 60.17, 24.94, 9)
 	for _, resolution := range []int{-1, cell.Resolution(), h3.MaxResolution + 1} {
 		_, coverErr := CoveringCells(cell, resolution)

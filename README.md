@@ -4,8 +4,9 @@ This repository builds a Go 1.27 service that serves bounded, zstd-compressed
 GeoParquet POI tiles by H3 cell. The service discovers Overture's STAC catalog,
 pins each request to a catalog version, queries the places assets through
 DuckDB, selects source partitions by conservative spatial bounds, and keeps
-successful tiles in a bounded disk cache. Tiles cover places with valid source
-bboxes and exclude missing or malformed bboxes. The HTTP API reports request
+successful tiles in a bounded disk cache. Spatial pruning also applies to
+pentagons and tiles crossing H3 face boundaries. Tiles cover places with valid
+source bboxes and exclude missing or malformed bboxes. The HTTP API reports request
 IDs, freshness changes, finer-cell guidance, and retryable
 capacity or upstream failures.
 

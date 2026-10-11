@@ -103,6 +103,32 @@ func TestReportedHelsinkiCellSelectsOnePartition(t *testing.T) {
 	assert.Assert(t, strings.Contains(assetURL, "part-00011-"))
 }
 
+func TestFaceCrossingCellPrunesDistantAssets(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Manifest[0].BBox = [4]float64{3, 50, 4, 52}
+	snapshot.Manifest[1].BBox = [4]float64{10, 10, 11, 11}
+	plan, err := BuildQueryPlan(TileRequest{Cell: "85194db3fffffff"}, []string{"id", "geometry"}, snapshot.Schema)
+	assert.NilError(t, err)
+	query, err := BuildCandidateQuery(plan, snapshot, 10)
+	assert.NilError(t, err)
+	assert.Equal(t, query.SelectedAssetCount, 1)
+	assert.Equal(t, query.SelectedAssetBytes, snapshot.Manifest[0].SizeBytes)
+	for _, arg := range query.Args {
+		assert.Assert(t, arg != snapshot.Manifest[1].Href)
+	}
+	for _, predicate := range []string{"bbox.ymax >= ?", "bbox.ymin <= ?", "bbox.xmax >= ?", "bbox.xmin <= ?"} {
+		assert.Assert(t, strings.Contains(query.SQL, predicate), query.SQL)
+	}
+	metadata, err := candidateMetadata(plan)
+	assert.NilError(t, err)
+	var parsed geoparquet.GeoMetadata
+	assert.NilError(t, json.Unmarshal(metadata, &parsed))
+	bbox := parsed.Columns[geoparquet.GeometryColumnName].BBox
+	assert.Equal(t, len(bbox), 4)
+	assert.Assert(t, bbox[2]-bbox[0] < 1)
+	assert.Assert(t, bbox[3]-bbox[1] < 1)
+}
+
 func TestEmptySelectionPreservesNestedOutputSchema(t *testing.T) {
 	connection := openDuckDBConnection(t)
 	ctx := context.Background()
