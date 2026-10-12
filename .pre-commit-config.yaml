@@ -17,11 +17,18 @@ repos:
       - id: end-of-file-fixer
       - id: mixed-line-ending
       - id: trailing-whitespace
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.13.2
+  - repo: local
     hooks:
-      - id: golangci-lint-config-verify
-      - id: golangci-lint-full
-      - id: golangci-lint-full
-        name: golangci-lint build tools
-        entry: bash -c 'cd build/tools && golangci-lint run --fix --config ../../.golangci.yaml'
+      - id: golangci-lint
+        name: "Run golangci-lint"
+        language: system
+        types: [go]
+        pass_filenames: false
+        entry: go tool golangci-lint run --fix
+
+      - id: golangci-lint-build-tools
+        name: "Run golangci-lint build tools"
+        language: system
+        types: [go]
+        pass_filenames: false
+        entry: bash -c 'cd build/tools && go tool golangci-lint run --fix --config ../../.golangci.yaml'
