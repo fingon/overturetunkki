@@ -52,3 +52,24 @@ func TestScratchPoolRejectsInvalidOptions(t *testing.T) {
 	var reservation *ScratchReservation
 	assert.Assert(t, reservation.Release() != nil)
 }
+
+func TestScratchReservationShrinksAndWakesWaiters(t *testing.T) {
+	pool, err := NewScratchPool(10)
+	assert.NilError(t, err)
+	reservation, err := pool.Reserve(t.Context(), 10)
+	assert.NilError(t, err)
+	result := make(chan *ScratchReservation, 1)
+	go func() {
+		second, reserveErr := pool.Reserve(t.Context(), 7)
+		assert.NilError(t, reserveErr)
+		result <- second
+	}()
+	assert.Assert(t, errors.Is(reservation.Shrink(11), ErrInvalidScratchReservation))
+	assert.NilError(t, reservation.Shrink(3))
+	second := <-result
+	assert.Equal(t, pool.Stats().ReservedBytes, int64(10))
+	assert.NilError(t, second.Release())
+	assert.NilError(t, reservation.Release())
+	assert.Assert(t, errors.Is(reservation.Shrink(1), ErrInvalidScratchReservation))
+	assert.NilError(t, pool.Close())
+}

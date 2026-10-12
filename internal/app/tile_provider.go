@@ -27,8 +27,8 @@ import (
 	"github.com/fingon/overturetunkki/internal/config"
 	"github.com/fingon/overturetunkki/internal/h3filter"
 	"github.com/fingon/overturetunkki/internal/httpapi"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/fingon/overturetunkki/internal/worker"
-	"github.com/uber/h3-go/v4"
 )
 
 const (
@@ -37,7 +37,7 @@ const (
 	duckdbExtensionDirectoryEnv       = "OVERTURE_DUCKDB_EXTENSION_DIRECTORY"
 	duckdbDataPathEnv                 = "KO_DATA_PATH"
 	workerProtocolEnv                 = "OVERTURE_WORKER_PROTOCOL"
-	workerProtocolValue               = "tile-v1"
+	workerProtocolValue               = "tile-v2"
 	workerProtocolMaxBytes      int64 = 1 << 20
 )
 
@@ -59,6 +59,9 @@ type tileProvider struct {
 
 	mu                 sync.Mutex
 	lastCatalogVersion string
+	flights            map[cache.Key]*h3Flight
+	flightsWait        sync.WaitGroup
+	closed             bool
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -82,8 +85,8 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 		return nil, err
 	}
 	perWorkerScratchBytes := cfg.ScratchMaxBytes / cfg.WorkerCount
-	if perWorkerScratchBytes <= 0 {
-		return nil, errors.New("create tile provider: per-worker scratch capacity is not positive")
+	if perWorkerScratchBytes <= cfg.MaxTileBytes {
+		return nil, errors.New("create tile provider: per-worker scratch capacity must exceed max-tile-bytes")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -92,7 +95,7 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 	if !filepath.IsAbs(executable) {
 		return nil, fmt.Errorf("tile worker executable is not absolute: %q", executable)
 	}
-	scheduler, err := cache.NewScheduler(tileCache, cache.SchedulerOptions{Workers: workerCount, QueueCapacity: queueCapacity})
+	scheduler, err := cache.NewScheduler(tileCache, cache.SchedulerOptions{Workers: workerCount, QueueCapacity: queueCapacity, Timeout: cfg.TileTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +104,7 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 		MemoryBytes:      cfg.WorkerMemoryBytes,
 		Threads:          cfg.WorkerThreads,
 		ScratchDirectory: filepath.Join(cfg.CacheDir, "scratch"),
-		ScratchMaxBytes:  perWorkerScratchBytes,
+		ScratchMaxBytes:  perWorkerScratchBytes - cfg.MaxTileBytes,
 		MaxOutputBytes:   cfg.MaxTileBytes,
 		TileTimeout:      cfg.TileTimeout,
 	}
@@ -122,22 +125,30 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 	return provider, nil
 }
 
-func (provider *tileProvider) Get(ctx context.Context, generation catalog.Generation, cell h3.Cell) (httpapi.Tile, error) {
+func (provider *tileProvider) Get(ctx context.Context, generation catalog.Generation, query tilequery.Query) (httpapi.Tile, error) {
 	if provider == nil {
 		return httpapi.Tile{}, errors.New("get tile: provider is nil")
 	}
 	if ctx == nil {
 		return httpapi.Tile{}, errors.New("get tile: context is nil")
 	}
-	if !cell.IsValid() {
-		return httpapi.Tile{}, errors.New("get tile: cell is invalid")
+	if err := query.Validate(); err != nil {
+		return httpapi.Tile{}, err
 	}
-	if cell.Resolution() < provider.minResolution {
-		return httpapi.Tile{}, &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: provider.minResolution}
+	if query.Square == nil {
+		cell, err := worker.ParseCanonicalCell(query.Cell)
+		if err != nil {
+			return httpapi.Tile{}, err
+		}
+		if cell.Resolution() < provider.minResolution {
+			return httpapi.Tile{}, &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: provider.minResolution}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return httpapi.Tile{}, fmt.Errorf("get tile: %w", err)
 	}
+	ctx, cancel := context.WithTimeout(ctx, provider.settings.TileTimeout)
+	defer cancel()
 	if generation.Context == nil {
 		return httpapi.Tile{}, errors.New("get tile: catalog generation context is nil")
 	}
@@ -151,13 +162,22 @@ func (provider *tileProvider) Get(ctx context.Context, generation catalog.Genera
 	key := cache.Key{
 		CatalogVersion: snapshot.CatalogVersion,
 		ProjectionID:   snapshot.ProjectionID,
-		Cell:           cell.String(),
+		Tile:           query.String(),
 		SizePolicyID:   provider.policyID,
+	}
+	provider.mu.Lock()
+	closed := provider.closed
+	provider.mu.Unlock()
+	if closed {
+		return httpapi.Tile{}, cache.ErrSchedulerClosed
 	}
 	if rejection, ok, err := provider.negative.Get(key); err != nil {
 		return httpapi.Tile{}, fmt.Errorf("check tile negative cache: %w", err)
 	} else if ok {
 		return httpapi.Tile{}, rejectionError(rejection)
+	}
+	if query.Square == nil {
+		return provider.getH3(ctx, generation, key)
 	}
 	if tile, err := provider.openCachedTile(key); err == nil {
 		return tile, nil
@@ -172,7 +192,7 @@ func (provider *tileProvider) Get(ctx context.Context, generation catalog.Genera
 		if err := generation.Context.Err(); err != nil {
 			return fmt.Errorf("build tile: catalog generation canceled: %w", err)
 		}
-		return provider.build(generationBuildContext, reservation, key, tileBuildOptions{Snapshot: snapshot, Cell: cell})
+		return provider.build(generationBuildContext, reservation, key, tileBuildOptions{Snapshot: snapshot, Query: query})
 	}); err != nil {
 		return httpapi.Tile{}, err
 	}
@@ -197,7 +217,7 @@ func (provider *tileProvider) openCachedTile(key cache.Key) (httpapi.Tile, error
 
 type tileBuildOptions struct {
 	Snapshot    catalog.Snapshot
-	Cell        h3.Cell
+	Query       tilequery.Query
 	SourcePaths []string
 }
 
@@ -239,7 +259,7 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 	if closeErr := staging.Close(); closeErr != nil {
 		return fmt.Errorf("close tile staging: %w", closeErr)
 	}
-	scratchReservation, err := provider.scratch.Reserve(ctx, provider.settings.ScratchMaxBytes)
+	scratchReservation, err := provider.scratch.Reserve(ctx, provider.settings.ScratchMaxBytes+provider.maxBytes)
 	if err != nil {
 		return fmt.Errorf("reserve tile scratch: %w", err)
 	}
@@ -252,11 +272,11 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 			err = fmt.Errorf("%w; release tile scratch: %w", err, releaseErr)
 		}
 	}()
-	plan, err := worker.BuildQueryPlan(worker.TileRequest{Cell: options.Cell.String()}, provider.fields, options.Snapshot.Schema)
+	plan, err := worker.BuildQueryPlan(options.Query, provider.fields, options.Snapshot.Schema)
 	if err != nil {
 		return fmt.Errorf("build tile query plan: %w", err)
 	}
-	sources, err := provider.cachedSources(key, options.Cell)
+	sources, err := provider.cachedSources(key, *options.Query.Square)
 	if err != nil {
 		return fmt.Errorf("select cached tile sources: %w", err)
 	}
@@ -265,7 +285,7 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 	if len(sources.paths) > 0 {
 		sourceKind = "cache"
 	}
-	slog.Debug("tile build sources selected", "cell", key.Cell, "catalog_version", key.CatalogVersion, "source_kind", sourceKind, "source_count", len(sources.paths), "source_bytes", sources.sizeBytes)
+	slog.Debug("tile build sources selected", "cell", key.Tile, "catalog_version", key.CatalogVersion, "source_kind", sourceKind, "source_count", len(sources.paths), "source_bytes", sources.sizeBytes)
 	result, workerErr := provider.runWorker(ctx, plan, stagingPath, options)
 	err = errors.Join(workerErr, sources.Close())
 	if err != nil {
@@ -333,10 +353,17 @@ func (provider *tileProvider) Close() error {
 		return errors.New("close tile provider: provider is nil")
 	}
 	provider.closeOnce.Do(func() {
+		provider.mu.Lock()
+		provider.closed = true
+		for _, flight := range provider.flights {
+			flight.cancel()
+		}
+		provider.mu.Unlock()
 		var closeErrors []error
 		if err := provider.scheduler.Close(); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("close tile scheduler: %w", err))
 		}
+		provider.flightsWait.Wait()
 		if err := provider.negative.Close(); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("close tile negative cache: %w", err))
 		}
@@ -354,6 +381,7 @@ func (provider *tileProvider) Close() error {
 func (provider *tileProvider) runWorker(ctx context.Context, plan worker.QueryPlan, outputPath string, options tileBuildOptions) (worker.TileResult, error) {
 	request := tileWorkerRequest{
 		Cell:        plan.CellText,
+		Square:      plan.Square,
 		Fields:      append([]string(nil), provider.fields...),
 		Snapshot:    options.Snapshot,
 		SourcePaths: options.SourcePaths,
@@ -365,6 +393,7 @@ func (provider *tileProvider) runWorker(ctx context.Context, plan worker.QueryPl
 }
 
 type tileWorkerRequest struct {
+	Square      *tilequery.Square      `json:"square,omitempty"`
 	Cell        string                 `json:"cell"`
 	Fields      []string               `json:"fields"`
 	Snapshot    catalog.Snapshot       `json:"snapshot"`
@@ -372,6 +401,10 @@ type tileWorkerRequest struct {
 	OutputPath  string                 `json:"output_path"`
 	Settings    worker.RuntimeSettings `json:"settings"`
 	SourcePaths []string               `json:"source_paths,omitempty"`
+}
+
+func (request tileWorkerRequest) query() tilequery.Query {
+	return tilequery.Query{Cell: request.Cell, Square: request.Square}
 }
 
 type tileWorkerResponse struct {
@@ -412,7 +445,7 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 		return worker.TileResult{}, errors.New("run isolated tile worker: cache directory is empty")
 	}
 	started := time.Now()
-	plan, err := worker.BuildQueryPlan(worker.TileRequest{Cell: request.Cell}, request.Fields, request.Snapshot.Schema)
+	plan, err := worker.BuildQueryPlan(request.query(), request.Fields, request.Snapshot.Schema)
 	if err != nil {
 		return worker.TileResult{}, err
 	}
@@ -420,7 +453,7 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 	if err != nil {
 		return worker.TileResult{}, err
 	}
-	slog.Info("tile worker started", "cell", request.Cell, "release", request.Snapshot.Release,
+	slog.Info("tile worker started", "tile", request.query().String(), "release", request.Snapshot.Release,
 		"manifest_asset_count", len(request.Snapshot.Manifest), "cached_source_count", len(request.SourcePaths), "selected_asset_count", query.SelectedAssetCount,
 		"selected_asset_bytes", query.SelectedAssetBytes, "tile_timeout_sec", request.Settings.TileTimeout.Seconds())
 	workerDiagnostics := worker.TileDiagnostics{Stage: "process", SelectedAssetCount: query.SelectedAssetCount, SelectedAssetBytes: query.SelectedAssetBytes}
@@ -429,7 +462,7 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 		if err != nil {
 			logLevel = slog.LevelWarn
 		}
-		slog.Log(ctx, logLevel, "tile worker finished", "cell", request.Cell, "release", request.Snapshot.Release,
+		slog.Log(ctx, logLevel, "tile worker finished", "tile", request.query().String(), "release", request.Snapshot.Release,
 			"elapsed_ms", time.Since(started).Milliseconds(), "stage", workerDiagnostics.Stage,
 			"selected_asset_count", workerDiagnostics.SelectedAssetCount, "selected_asset_bytes", workerDiagnostics.SelectedAssetBytes,
 			"planning_ms", workerDiagnostics.PlanningMS, "materialize_ms", workerDiagnostics.MaterializeMS,
@@ -477,7 +510,7 @@ func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, req
 	if response.Diagnostics != nil {
 		workerDiagnostics = *response.Diagnostics
 		if workerDiagnostics.MaterializeProfile != "" {
-			slog.Debug("tile scan profile", "cell", request.Cell, "release", request.Snapshot.Release,
+			slog.Debug("tile scan profile", "tile", request.query().String(), "release", request.Snapshot.Release,
 				"profile", workerDiagnostics.MaterializeProfile)
 		}
 	}
@@ -619,7 +652,7 @@ func executeWorkerRequest(ctx context.Context, request tileWorkerRequest, diagno
 	if err := request.Settings.Validate(); err != nil {
 		return worker.TileResult{}, err
 	}
-	plan, err := worker.BuildQueryPlan(worker.TileRequest{Cell: request.Cell}, request.Fields, request.Snapshot.Schema)
+	plan, err := worker.BuildQueryPlan(request.query(), request.Fields, request.Snapshot.Schema)
 	if err != nil {
 		return worker.TileResult{}, err
 	}
@@ -714,7 +747,7 @@ func configureTileConnection(ctx context.Context, connection *sql.Conn) error {
 }
 
 func sizePolicyID(cfg config.Config) string {
-	input := fmt.Sprintf("bytes=%d;rows=%d;min_resolution=%d;fields=%s", cfg.MaxTileBytes, cfg.MaxTileRows, cfg.MinTileResolution, strings.Join(cfg.Fields, ","))
+	input := fmt.Sprintf("xyz-v1;bytes=%d;rows=%d;min_resolution=%d;fields=%s", cfg.MaxTileBytes, cfg.MaxTileRows, cfg.MinTileResolution, strings.Join(cfg.Fields, ","))
 	digest := sha256.Sum256([]byte(input))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }

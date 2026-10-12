@@ -9,8 +9,9 @@ scheduling, the HTTP endpoint contract, GeoParquet writer compatibility, typed
 command configuration, catalog validation, catalog observation, service wiring,
 the CLI testing client, and the opt-in container harness are implemented.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
-using DuckDB, return POIs for an H3 cell, and retain successful tiles in a
-bounded disk LRU. The initial dataset is `theme=places/type=place`; other
+using DuckDB, return POIs for XYZ squares or H3 cells, and retain successful
+squares in a bounded disk LRU. H3 results are temporary compositions of at most
+four squares. The initial dataset is `theme=places/type=place`; other
 themes, historical release serving, arbitrary SQL, and distributed cache
 coordination are out of scope. Remaining implementation work and feasibility
 gates are in [TODO.md](TODO.md).
@@ -31,7 +32,8 @@ longitude, requested_cell)` as a DuckDB chunk scalar UDF. It accepts explicit
 `DOUBLE`, `DOUBLE`, and `UBIGINT` inputs, preserves DuckDB's default NULL-in/
 NULL-out behavior, and applies the pinned H3 `LatLngToCell` operation at the
 requested cell's resolution. Registration and execution errors are returned to
-DuckDB; invalid coordinates and cells are not silently discarded.
+DuckDB; invalid coordinates and cells are not silently discarded. Bind the query
+context before chunk execution so parallel callbacks share immutable context.
 
 ## Architecture
 
@@ -101,7 +103,8 @@ Catalog and projection identities use compact canonical JSON with sorted object
 keys, contract-ordered arrays, and a trailing LF before SHA-256 hashing. The
 catalog hash includes the release, selected asset provider, sorted manifest,
 and validated schema; the projection hash includes ordered selected columns,
-their resolved metadata, H3 semantics, and the GeoParquet writer revision.
+their resolved metadata, H3 and XYZ semantics, polar clipping, ID ordering,
+and the GeoParquet writer revision.
 
 `catalog.Observer` serializes state publication and coalesces overlapping
 refresh callers onto one check; caller cancellation only detaches that caller.
@@ -166,13 +169,16 @@ a request keyed by a newer version.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /v1/catalog` | Apply shared catalog freshness; return release, catalog version, projection ID, selected fields, limits, supported H3 resolutions, and attribution links. |
-| `GET /v1/tiles/places/{h3}?catalog_version=...` | Require the expected version; return one complete GeoParquet file or a structured error. |
+| `GET /v1/catalog` | Apply shared catalog freshness; return release, catalog version, projection ID, selected fields, limits, supported H3 resolutions, supported XYZ zooms, and attribution links. |
+| `GET /v1/tiles/places/{h3}?catalog_version=...` | Require the expected version; compose one H3 GeoParquet response from at most four squares. |
+| `GET /v1/tiles/places/xyz/{z}/{x}/{y}?catalog_version=...` | Require the expected version; return one complete cached or built square GeoParquet file. |
 | `GET /livez` | Supervisor is running. |
 | `GET /readyz` | Catalog ready, workers healthy, cache writable, and resources available. |
 | `GET /metrics` | Operational metrics, restricted by deployment networking. |
 
-Reject a missing version or invalid cell with `400`. Validate a canonical
+Reject a missing version or invalid query with `400`. XYZ coordinates are
+canonical unsigned decimal integers with zoom 0–22 and X/Y below `2^zoom`.
+Y increases southward. Invalid XYZ queries are rejected before catalog checks. Validate a canonical
 lowercase hexadecimal H3 cell index, cell mode, and resolution 0 through 15;
 resolution comes from the index. Requests below `min_tile_resolution` return
 `422` before any freshness check, version comparison, cache lookup, or job
@@ -194,7 +200,7 @@ Errors are JSON with `code`, `message`, `retryable`, and known catalog context:
 | --- | --- | --- |
 | 400 | `invalid_request` | Correct parameters. |
 | 409 | `catalog_changed` | Refresh catalog and discard old tiles. |
-| 422 | `tile_too_large` | Request a finer H3 resolution. |
+| 422 | `tile_too_large` | Request finer H3 cells or four square children at the suggested XYZ zoom. |
 | 503 | `catalog_unavailable`, `capacity_unavailable`, `upstream_unavailable`, `server_shutting_down` | Retry with backoff; honor `Retry-After`. |
 | 504 | `tile_timeout` | Retry later; this does not prove the tile is oversized. |
 | 500 | `internal_error` | Report request ID; server logs the cause. |
@@ -242,13 +248,14 @@ Initial commands:
 | Command | Behavior |
 | --- | --- |
 | `overture-client catalog` | Fetch and print catalog JSON, including version, fields, limits, and attribution. |
+| `overture-client square <z> <x> <y> --output square.parquet` | Discover the current catalog, request one XYZ square, and save its complete response. |
 | `overture-client tile <h3> --output tile.parquet` | Discover the current catalog, request one cell with its version, and save the complete response. |
 | `overture-client tile <h3> --catalog-version <version> --output tile.parquet` | Send the supplied version unchanged, allowing stale-version rejection tests. |
 
 Common flags are `--server-url` (default `http://localhost:8080`), `--timeout`
 (default `60s`, covering the entire command), and `-v`. Use environment variables
 prefixed `OVERTURE_CLIENT_`. Require an HTTP(S) server URL and a nonempty output
-path for tile downloads. Reject invalid H3 input locally. An optional
+path for tile downloads. Reject invalid H3 or XYZ input locally. An optional
 `--if-none-match` sends an ETag for conditional-request testing. A `304` reports
 the result without creating or changing an output file; it does not assert that
 an existing local file is valid. Initially perform no automatic retries or
@@ -267,7 +274,8 @@ destination unless `--force` is supplied, and preserve it on any failed download
 Delete partial files on error or cancellation and report cleanup failures.
 
 Write catalog JSON and tile-result JSON to stdout; write diagnostics to stderr.
-Tile results contain HTTP status, H3 cell, release, catalog version, projection
+Tile results contain HTTP status, H3 cell or a `square` object with `z`, `x`,
+`y`, release, catalog version, projection
 ID, ETag, downloaded bytes, elapsed time, and published path when applicable.
 Never write binary Parquet to stdout. Bound error-response reads and display
 structured API errors, including request ID and Retry-After when present;
@@ -346,12 +354,13 @@ provides validated S3 asset lists and generated output paths. Clients cannot
 supply SQL, S3 URLs, column lists, or filesystem paths. Retain source nulls and
 types. Invalid/null/non-point geometries are an upstream data error, not silently
 skipped records. The projection ID hashes ordered columns, resolved types,
-geometry encoding, H3 and bbox eligibility semantics, and writer-format revision.
+geometry encoding, H3/XYZ membership, polar clipping, ID ordering, valid-bbox
+eligibility, and writer-format revision.
 
 ## DuckDB query and bounded output
 
 Validate the complete pinned manifest, then select only places assets whose
-catalog bboxes intersect the conservative H3 cell bounds. Selection retains
+catalog bboxes intersect the requested square bounds. Selection retains
 boundary-touching and antimeridian intersections, and all assets for global
 bounds. Read the selected assets through DuckDB `httpfs`; retain projection
 and row-level bbox predicate pushdown. Split ordinary and wrapped-longitude
@@ -475,9 +484,12 @@ accepts only constructed row/byte size proofs, bounds them with an LRU and TTL,
 and supports catalog-version invalidation; transient failures have no insertion
 path.
 
-Cache key: `(catalog_version, projection_id, H3 cell, size_policy_id)`.
+Cache key: `(catalog_version, projection_id, XYZ identity, size_policy_id)`.
+The persisted identity field is `tile`, with a canonical `xyz/z/x/y` value.
+Old sidecars using `cell` fail reconciliation and are removed with their files.
 The size policy hashes byte/row limits, the minimum resolution, and selected
-fields, preventing reuse across different admission and rejection policies. Compression and writer revisions are part of projection identity.
+fields and an XYZ cache revision, preventing reuse across different admission
+and rejection policies. Compression and writer revisions are part of projection identity.
 Files live under hash-derived paths, never raw request paths.
 
 Maintain an in-memory map and doubly linked LRU with persistent sidecar metadata
@@ -513,7 +525,7 @@ and the waiting queue; return `503` when full. Caller cancellation detaches that
 caller. Discard queued work when no callers remain; after dequeue (including
 reservation acquisition), finish work even without callers. Cancel running work
 on catalog fencing/expiry, shutdown, or worker deadline. HTTP admission counts distinct
-`(catalog_version, projection_id, cell)` requests up to `worker_count`; callers
+`(catalog_version, projection_id, query identity)` requests up to `worker_count`; callers
 for an already admitted tile share its slot until their final handler finishes.
 Each scheduled build rechecks positive and negative caches before starting
 expensive work, preventing a stale miss from launching a duplicate build. Cancel
@@ -527,29 +539,59 @@ abandoned queued jobs, detached publication, later reattachment, shared HTTP
 admission, generation-key fencing, publication/storage failures, interrupted sidecar
 publication, orphan cleanup, corruption, and restart accounting.
 
-On an exact miss, try deriving the requested tile from cached coarser tiles.
-Search resolutions from nearest to coarsest, down to `min_tile_resolution`, and
-use the first complete covering set with matching catalog, projection, and
-size policy. Enumerate conservative geographic bounds with H3's
-`ContainmentOverlappingBbox` mode, splitting antimeridian intervals; logical
-parent membership alone cannot prove coverage. Require every source at one
-resolution, with at most 64 files. Global/polar bounds and intervals spanning
-180 degrees or more fall back upstream, as do incomplete or excessive covers.
-Do not combine mixed resolutions, wait for larger builds, or merge partial
-cached coverage with upstream data.
+On an exact square miss, search ancestors from the immediate parent to zoom 0.
+Use the nearest compatible cached ancestor with matching catalog, projection,
+and size policy; otherwise build the requested square from upstream. Pin the
+source throughout worker execution and filter by exact square membership.
+Missing ancestors allow trying the next ancestor; other failures propagate.
+Persist successfully derived squares under their own XYZ identity.
 
-Pin source readers during selection and worker execution. Missing entries
-release partial pins and allow trying the next coarser resolution; unexpected
-filesystem, query, or cleanup failures propagate. Pass optional absolute local
-`source_paths` in the `tile-v1` worker request. An absent/empty list retains
-upstream selection. DuckDB reads GeoParquet geometry as native geometry and
-filters the combined local files by exact H3 point membership, preserving the
-selected columns and row semantics. Reuse existing limits, scratch, timeout,
-COPY, metadata, and validation. Release source pins after worker validation,
-before publishing under the requested tile's own key. Derived tiles and proven
-size rejections follow normal cache policy. Logs identify source kind, count,
-and bytes. Boundary, nested-column, empty-output, antimeridian, incomplete-cover,
-identity, corruption, and cleanup tests verify local reuse.
+XYZ bounds use standard Web Mercator inverse projection. Longitude 180° is
+normalized to −180°. West/north edges are inclusive; east/south edges are
+exclusive, except the outer southern latitude boundary is included. Exact
+point predicates therefore assign each in-range POI to one square. Upstream
+bbox pruning includes longitude 180° when selecting the first column. Points
+outside ±atan(sinh(π)) latitude are omitted.
+
+H3 requests clip conservative H3 bounds to that latitude range and split
+antimeridian intervals. Select the highest zoom whose complete conservative
+cover contains no more than four distinct squares. Fetch those squares
+sequentially through the normal square path and stop at the first failure.
+Each H3 build performs at most four square fetches, counting cache hits; it
+never substitutes children, retries another covering zoom, or queries upstream
+H3 data directly. A source row/byte rejection returns HTTP 422 for the original
+H3 cell with existing refinement guidance and the offending square in the
+message. Wholly polar cells return valid empty GeoParquet; empty output uses
+a schema-only Parquet query against one validated source asset, without
+scanning POI rows; STAC column types may be incomplete.
+
+Pin completed source files while the worker applies exact H3 membership and
+deduplicates POI IDs before final row/byte checks. Sort exported rows by ID for
+stable repeated ETags. Pass absolute local `source_paths` in the worker protocol;
+H3 compositions use at most four files. Square requests without local sources
+retain upstream selection. Geometry, projection, COPY, metadata, and validation
+contracts apply to both styles.
+
+H3 orchestration runs outside worker slots. Square builds and final H3 assembly
+share one bounded worker queue, including when worker-count is one. Coalesce
+H3 callers through a reference-counted temporary result; do not publish H3
+files or sidecars. Cancel H3 work when its last caller leaves, on generation
+fencing, shutdown, or its overall deadline. Temporary files remain in staging
+until the final reader closes, then are deleted.
+
+Reserve one per-worker scratch allowance during execution. Deduct the maximum
+output allowance from DuckDB spill capacity. After H3 output completes, shrink
+the reservation to its actual file size and retain it through the final reader
+close. Queue, source fetches, and H3 assembly share one tile deadline. Successful
+square source builds may finish caching after their H3 caller disconnects.
+
+Proven final H3 row/byte rejections use the bounded negative cache. An oversized
+source square is recorded only under that square; it does not prove that the
+H3 output itself exceeds the limit.
+
+Square errors contain `zoom`, `x`, `y`, `suggested_zoom`, `can_refine`, and the
+failed row/byte limit. Refinement requests all four children. Zoom 22 is terminal.
+H3 errors preserve the H3 fields and resolution-15 terminal behavior.
 
 Cache `tile_too_large` decisions in a separate bounded in-memory LRU with a short
 TTL, keyed identically. Do not cache transient upstream/storage failures as size
@@ -604,7 +646,8 @@ These defaults are starting points to validate with representative POIs.
 Reject nonpositive limits, unsupported fields, an unwritable cache, and
 `cache_max_bytes < max_tile_bytes`. Require `id` and `geometry`, reject duplicate
 or unknown fields, and reject malformed listen or catalog URLs. Validate
-concurrency against deployment memory and scratch allocations; DuckDB memory
+concurrency against deployment memory and scratch allocations; require
+`scratch_max_bytes / worker_count > max_tile_bytes` so output and spill fit; DuckDB memory
 limits do not bound total process RSS. Use container memory/CPU limits in
 addition. Log failures with structured request ID, catalog version, H3 cell,
 duration, and error metadata, without credentials. Metrics cover catalog

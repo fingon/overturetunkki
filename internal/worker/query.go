@@ -13,6 +13,7 @@ import (
 	"github.com/fingon/overturetunkki/internal/catalog"
 	"github.com/fingon/overturetunkki/internal/geoparquet"
 	"github.com/fingon/overturetunkki/internal/h3filter"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/uber/h3-go/v4"
 )
 
@@ -46,11 +47,11 @@ func (*ResolutionTooCoarseError) Unwrap() error {
 	return ErrResolutionTooCoarse
 }
 
-type TileRequest struct {
-	Cell string
-}
+type TileRequest = tilequery.Query
 
 type QueryPlan struct {
+	Square        *tilequery.Square
+	Empty         bool
 	Cell          h3.Cell
 	CellText      string
 	CellValue     uint64
@@ -85,6 +86,16 @@ type candidateCopyRequest struct {
 	MaxBytes   int64
 }
 
+type SourceSquareError struct {
+	Square tilequery.Square
+	Err    error
+}
+
+func (err *SourceSquareError) Error() string {
+	return fmt.Sprintf("source square %s is too large: %v", err.Square, err.Err)
+}
+func (err *SourceSquareError) Unwrap() error { return err.Err }
+
 type TooManyRowsError struct {
 	ActualRows int64
 	LimitRows  int64
@@ -103,7 +114,7 @@ type candidateRows struct {
 }
 
 func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int64) (PreparedQuery, error) {
-	if !plan.Cell.IsValid() {
+	if !plan.valid() {
 		return PreparedQuery{}, fmt.Errorf("%w: query plan cell is invalid", ErrInvalidCell)
 	}
 	if len(plan.Columns) == 0 {
@@ -119,7 +130,7 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 	if err != nil {
 		return PreparedQuery{}, fmt.Errorf("build candidate query: %w", err)
 	}
-	bounds, err := h3filter.CellBounds(plan.Cell)
+	bounds, err := plan.bounds()
 	if err != nil {
 		return PreparedQuery{}, fmt.Errorf("build candidate query bounds: %w", err)
 	}
@@ -144,12 +155,12 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 	var args []any
 	for _, branch := range branches {
 		queries = append(queries, fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE (%s) AND %s",
-			projectionSQL, strings.Join(placeholders, ", "), branch.Predicate, exactMembershipSQL()))
+			projectionSQL, strings.Join(placeholders, ", "), branch.Predicate, plan.membershipSQL()))
 		for _, assetURL := range assetURLs {
 			args = append(args, assetURL)
 		}
 		args = append(args, branch.Args...)
-		args = append(args, plan.CellValue)
+		args = append(args, plan.membershipArgs()...)
 	}
 	args = append(args, rowLimit)
 	return PreparedQuery{
@@ -161,10 +172,10 @@ func BuildCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int6
 }
 
 func BuildCachedCandidateQuery(plan QueryPlan, sourcePaths []string, maxRows int64) (PreparedQuery, error) {
-	if !plan.Cell.IsValid() || len(plan.Columns) == 0 {
+	if !plan.valid() || len(plan.Columns) == 0 {
 		return PreparedQuery{}, errors.New("build cached candidate query: invalid query plan")
 	}
-	if len(sourcePaths) == 0 || len(sourcePaths) > h3filter.MaxCoveringCells {
+	if len(sourcePaths) == 0 || len(sourcePaths) > tilequery.MaxSources {
 		return PreparedQuery{}, errors.New("build cached candidate query: invalid source count")
 	}
 	rowLimit, err := CandidateRowLimit(maxRows)
@@ -185,18 +196,39 @@ func BuildCachedCandidateQuery(plan QueryPlan, sourcePaths []string, maxRows int
 		placeholders[index] = "?"
 		args = append(args, sourcePath)
 	}
-	args = append(args, plan.CellValue, rowLimit)
+	args = append(args, plan.membershipArgs()...)
+	args = append(args, rowLimit)
 	return PreparedQuery{
-		SQL:  fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE %s LIMIT ?", candidateProjectionSQL(plan.Columns), strings.Join(placeholders, ", "), exactMembershipSQL()),
+		SQL:  fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE %s QUALIFY row_number() OVER (PARTITION BY id ORDER BY id) = 1 LIMIT ?", candidateProjectionSQL(plan.Columns), strings.Join(placeholders, ", "), plan.membershipSQL()),
 		Args: args,
 	}, nil
 }
 
 func PrepareTileQuery(plan QueryPlan, snapshot catalog.Snapshot, sourcePaths []string, maxRows int64) (PreparedQuery, error) {
+	if plan.Empty {
+		return emptyCandidateQuery(plan, snapshot, maxRows)
+	}
 	if len(sourcePaths) > 0 {
 		return BuildCachedCandidateQuery(plan, sourcePaths, maxRows)
 	}
 	return BuildCandidateQuery(plan, snapshot, maxRows)
+}
+
+func emptyCandidateQuery(plan QueryPlan, snapshot catalog.Snapshot, maxRows int64) (PreparedQuery, error) {
+	if !plan.valid() || len(plan.Columns) == 0 {
+		return PreparedQuery{}, errors.New("empty tile: invalid query plan")
+	}
+	if _, err := CandidateRowLimit(maxRows); err != nil {
+		return PreparedQuery{}, err
+	}
+	assetURLs, _, err := pinnedAssetURLs(snapshot, h3filter.GlobalBounds())
+	if err != nil {
+		return PreparedQuery{}, err
+	}
+	if len(assetURLs) == 0 {
+		return PreparedQuery{}, errors.New("empty tile: catalog has no schema source")
+	}
+	return PreparedQuery{SQL: "SELECT " + candidateProjectionSQL(plan.Columns) + " FROM read_parquet([?]) WHERE FALSE", Args: []any{assetURLs[0]}}, nil
 }
 
 func BuildTile(ctx context.Context, request TileBuildRequest) (CopyResult, error) {
@@ -292,7 +324,7 @@ func (rows candidateRows) copy(request candidateCopyRequest) (CopyResult, error)
 	if rows.rowCount < 0 {
 		return CopyResult{}, errors.New("copy candidates: row count is negative")
 	}
-	copySQL, err := geoparquet.CopySQL("SELECT * FROM "+candidateTableName, request.OutputPath, request.Metadata)
+	copySQL, err := geoparquet.CopySQL("SELECT * FROM "+candidateTableName+" ORDER BY id", request.OutputPath, request.Metadata)
 	if err != nil {
 		return CopyResult{}, fmt.Errorf("copy candidates: %w", err)
 	}
@@ -304,7 +336,7 @@ func (rows candidateRows) drop(ctx context.Context, conn *sql.Conn) error {
 }
 
 func candidateMetadata(plan QueryPlan) ([]byte, error) {
-	bounds, err := h3filter.CellBounds(plan.Cell)
+	bounds, err := plan.bounds()
 	if err != nil {
 		return nil, fmt.Errorf("build tile metadata bounds: %w", err)
 	}
@@ -336,21 +368,77 @@ func cleanupCandidateTable(ctx context.Context, conn *sql.Conn, cause error) err
 }
 
 func BuildQueryPlan(request TileRequest, fields []string, schema catalog.Schema) (QueryPlan, error) {
-	cell, err := ParseCanonicalCell(request.Cell)
-	if err != nil {
+	if err := request.Validate(); err != nil {
 		return QueryPlan{}, err
 	}
 	columns, projectionSQL, err := validateProjection(fields, schema)
 	if err != nil {
 		return QueryPlan{}, err
 	}
-	return QueryPlan{
-		Cell:          cell,
-		CellText:      cell.String(),
-		CellValue:     uint64(cell),
-		Columns:       columns,
-		ProjectionSQL: projectionSQL,
-	}, nil
+	plan := QueryPlan{Columns: columns, ProjectionSQL: projectionSQL}
+	if request.Square != nil {
+		square := *request.Square
+		plan.Square = &square
+		return plan, nil
+	}
+	cell, err := ParseCanonicalCell(request.Cell)
+	if err != nil {
+		return QueryPlan{}, err
+	}
+	plan.Cell = cell
+	plan.CellText = cell.String()
+	plan.CellValue = uint64(cell)
+	bounds, err := h3filter.CellBounds(cell)
+	if err != nil {
+		return QueryPlan{}, err
+	}
+	plan.Empty = bounds.LatitudeMinDeg > tilequery.LatitudeLimitDeg || bounds.LatitudeMaxDeg < -tilequery.LatitudeLimitDeg
+	return plan, nil
+}
+
+func (plan QueryPlan) valid() bool {
+	if plan.Square != nil {
+		return plan.Square.Validate() == nil && !plan.Cell.IsValid()
+	}
+	return plan.Cell.IsValid()
+}
+
+func (plan QueryPlan) bounds() (h3filter.Bounds, error) {
+	if plan.Square != nil {
+		rect := plan.Square.Bounds()
+		return h3filter.Bounds{
+			LatitudeMinDeg: rect.SouthDeg, LatitudeMaxDeg: rect.NorthDeg,
+			LongitudeIntervals: squareIntervals(*plan.Square, rect),
+		}, nil
+	}
+	return h3filter.CellBounds(plan.Cell)
+}
+
+func squareIntervals(square tilequery.Square, rect tilequery.Rect) []h3filter.LongitudeInterval {
+	intervals := []h3filter.LongitudeInterval{{MinDeg: rect.WestDeg, MaxDeg: rect.EastDeg}}
+	if square.X == 0 && square.Z > 0 {
+		intervals = append(intervals, h3filter.LongitudeInterval{MinDeg: tilequery.MaxLongitudeDeg, MaxDeg: tilequery.MaxLongitudeDeg})
+	}
+	return intervals
+}
+
+func (plan QueryPlan) membershipSQL() string {
+	if plan.Square != nil {
+		southComparison := ">"
+		if plan.Square.Y == (1<<plan.Square.Z)-1 {
+			southComparison = ">="
+		}
+		return fmt.Sprintf("(%s >= ? AND %s < ? AND %s <= ? AND %s %s ?)", normalizedLongitudeSQL(), normalizedLongitudeSQL(), latitudeSQL(), latitudeSQL(), southComparison)
+	}
+	return exactMembershipSQL() + " AND " + latitudeSQL() + " BETWEEN ? AND ?"
+}
+
+func (plan QueryPlan) membershipArgs() []any {
+	if plan.Square != nil {
+		bounds := plan.Square.Bounds()
+		return []any{bounds.WestDeg, bounds.EastDeg, bounds.NorthDeg, bounds.SouthDeg}
+	}
+	return []any{plan.CellValue, -tilequery.LatitudeLimitDeg, tilequery.LatitudeLimitDeg}
 }
 
 func ParseCanonicalCell(value string) (h3.Cell, error) {
@@ -415,29 +503,20 @@ func candidateProjectionSQL(columns []catalog.Column) string {
 	return strings.Join(selections, ", ")
 }
 
-func exactMembershipSQL() string {
+func coordinateSQL(axis string) string {
 	geometry := quoteIdentifier(geoparquet.GeometryColumnName)
-	latitude := fmt.Sprintf(
-		"CASE WHEN %s IS NULL OR ST_GeometryType(%s) <> '%s' THEN %s ELSE ST_Y(%s) END",
-		geometry,
-		geometry,
-		geometryPointType,
-		geometryInvalidSQL,
-		geometry,
-	)
-	longitude := fmt.Sprintf(
-		"CASE WHEN %s IS NULL OR ST_GeometryType(%s) <> '%s' THEN %s ELSE ST_X(%s) END",
-		geometry,
-		geometry,
-		geometryPointType,
-		geometryInvalidSQL,
-		geometry,
-	)
-	return fmt.Sprintf(
-		"h3_cell_contains(%s, %s, CAST(? AS UBIGINT))",
-		latitude,
-		longitude,
-	)
+	return fmt.Sprintf("CASE WHEN %s IS NULL OR ST_GeometryType(%s) <> '%s' THEN %s ELSE ST_%s(%s) END", geometry, geometry, geometryPointType, geometryInvalidSQL, axis, geometry)
+}
+
+func latitudeSQL() string { return coordinateSQL("Y") }
+
+func normalizedLongitudeSQL() string {
+	longitude := coordinateSQL("X")
+	return fmt.Sprintf("CASE WHEN (%s) = 180 THEN -180 ELSE (%s) END", longitude, longitude)
+}
+
+func exactMembershipSQL() string {
+	return fmt.Sprintf("h3_cell_contains(%s, %s, CAST(? AS UBIGINT))", latitudeSQL(), coordinateSQL("X"))
 }
 
 func validateProjection(fields []string, schema catalog.Schema) ([]catalog.Column, string, error) {

@@ -178,7 +178,7 @@ func (c Config) Validate() error {
 	if c.CacheMaxBytes < c.MaxTileBytes {
 		return fmt.Errorf("cache-max-bytes %d is smaller than max-tile-bytes %d", c.CacheMaxBytes, c.MaxTileBytes)
 	}
-	if c.WorkerCount > c.ScratchMaxBytes/c.MaxTileBytes {
+	if c.ScratchMaxBytes/c.WorkerCount <= c.MaxTileBytes {
 		return fmt.Errorf("worker-count %d exceeds scratch capacity for max-tile-bytes %d", c.WorkerCount, c.MaxTileBytes)
 	}
 	if len(c.Fields) == 0 {

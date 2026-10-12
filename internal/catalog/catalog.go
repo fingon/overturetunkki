@@ -31,6 +31,7 @@ const (
 	DefaultCollectionID                  = "place"
 	DefaultMaxResponseBytes        int64 = 16 * 1024 * 1024
 	DefaultProjectionH3Semantics         = "latlng-to-cell-v1"
+	DefaultProjectionXYZSemantics        = "xyz-webmercator-half-open-polar-empty-id-order-v1"
 	DefaultProjectionBBoxSemantics       = "valid-bbox-only-v1"
 	DefaultProjectionWriter              = "geoparquet-1.1-wkb-zstd-v1"
 
@@ -865,6 +866,7 @@ func projectionID(fields []string, schema Schema) (string, error) {
 	input := map[string]any{
 		"fields":           fields,
 		"h3_semantics":     DefaultProjectionH3Semantics,
+		"xyz_semantics":    DefaultProjectionXYZSemantics,
 		"bbox_semantics":   DefaultProjectionBBoxSemantics,
 		"resolved_columns": selectedColumns,
 		"writer_format":    DefaultProjectionWriter,

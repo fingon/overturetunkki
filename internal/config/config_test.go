@@ -161,6 +161,7 @@ func TestValidate(t *testing.T) {
 		{name: "nonpositive limit", mutate: func(cfg *Config) { cfg.MaxTileBytes = 0 }, message: "max-tile-bytes"},
 		{name: "cache smaller than tile", mutate: func(cfg *Config) { cfg.CacheMaxBytes = cfg.MaxTileBytes - 1 }, message: "smaller"},
 		{name: "workers exceed scratch", mutate: func(cfg *Config) { cfg.WorkerCount = cfg.ScratchMaxBytes/cfg.MaxTileBytes + 1 }, message: "scratch capacity"},
+		{name: "scratch must fit output and spill", mutate: func(cfg *Config) { cfg.WorkerCount = 1; cfg.ScratchMaxBytes = cfg.MaxTileBytes }, message: "scratch capacity"},
 		{name: "negative catalog grace", mutate: func(cfg *Config) { cfg.CatalogStaleGrace = -time.Second }, message: "catalog-stale-grace"},
 		{name: "catalog window overflow", mutate: func(cfg *Config) { cfg.CatalogPollInterval = time.Duration(1<<63 - 1) }, message: "catalog-stale-grace"},
 		{name: "empty fields", mutate: func(cfg *Config) { cfg.Fields = nil }, message: "fields must not be empty"},

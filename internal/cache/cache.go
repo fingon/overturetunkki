@@ -40,7 +40,7 @@ var (
 type Key struct {
 	CatalogVersion string `json:"catalog_version"`
 	ProjectionID   string `json:"projection_id"`
-	Cell           string `json:"cell"`
+	Tile           string `json:"tile"`
 	SizePolicyID   string `json:"size_policy_id"`
 }
 
@@ -267,6 +267,14 @@ func (c *Cache) RemoveStaging(path string) error {
 }
 
 func (c *Cache) Reserve(ctx context.Context, bytes int64) (*Reservation, error) {
+	return c.reserve(ctx, bytes, nil)
+}
+
+func (c *Cache) ReserveTile(ctx context.Context, key Key, bytes int64) (*Reservation, error) {
+	return c.reserve(ctx, bytes, &key.CatalogVersion)
+}
+
+func (c *Cache) reserve(ctx context.Context, bytes int64, catalogVersion *string) (*Reservation, error) {
 	if c == nil {
 		return nil, errors.New("reserve cache capacity: cache is nil")
 	}
@@ -284,6 +292,14 @@ func (c *Cache) Reserve(ctx context.Context, bytes int64) (*Reservation, error) 
 		if c.closed {
 			c.mu.Unlock()
 			return nil, ErrCacheClosed
+		}
+		if catalogVersion != nil {
+			if err := c.makeRoomLocked(bytes, *catalogVersion, 0, 0); err != nil {
+				if !errors.Is(err, ErrCapacityUnavailable) || c.usedEntries > 0 {
+					c.mu.Unlock()
+					return nil, fmt.Errorf("reserve tile capacity: %w", err)
+				}
+			}
 		}
 		if c.usedBytes+c.reservedBytes+bytes <= c.maxBytes && c.usedEntries+c.reservedEntries < c.maxEntries {
 			c.reservedBytes += bytes
@@ -347,7 +363,7 @@ func (reservation *Reservation) Release() error {
 }
 
 func (key Key) digest() (string, error) {
-	if key.CatalogVersion == "" || key.ProjectionID == "" || key.Cell == "" || key.SizePolicyID == "" {
+	if key.CatalogVersion == "" || key.ProjectionID == "" || key.Tile == "" || key.SizePolicyID == "" {
 		return "", errors.New("cache key fields must not be empty")
 	}
 	encoded, err := json.Marshal(key)

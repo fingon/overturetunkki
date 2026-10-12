@@ -17,6 +17,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/fingon/overturetunkki/internal/client"
 	"github.com/fingon/overturetunkki/internal/logging"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 )
 
 type cliConfig struct {
@@ -25,18 +26,30 @@ type cliConfig struct {
 	Verbose   bool          `env:"OVERTURE_CLIENT_VERBOSE" help:"Enable debug diagnostics." short:"v"`
 
 	Catalog catalogCommand `cmd:"" help:"Fetch catalog metadata."`
+	Square  squareCommand  `cmd:"" help:"Fetch one XYZ square tile."`
 	Tile    tileCommand    `cmd:"" help:"Fetch one H3 tile."`
 }
 
 type catalogCommand struct{}
 
-type tileCommand struct {
-	Cell             string `arg:"" help:"Canonical H3 cell index."`
+type downloadFlags struct {
 	CatalogVersion   string `help:"Explicit catalog version." name:"catalog-version"`
 	IfNoneMatch      string `help:"ETag for conditional tile testing." name:"if-none-match"`
 	Output           string `help:"Destination Parquet file." name:"output"`
 	Force            bool   `help:"Allow replacing an existing destination." name:"force"`
 	MaxDownloadBytes int64  `default:"67108864" env:"OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES" help:"Maximum downloaded response bytes." name:"max-download-bytes"`
+}
+
+type tileCommand struct {
+	Cell string `arg:"" help:"Canonical H3 cell index."`
+	downloadFlags
+}
+
+type squareCommand struct {
+	Z string `arg:"" help:"Zoom level (0-22)."`
+	X string `arg:"" help:"Tile column."`
+	Y string `arg:"" help:"Tile row from the north."`
+	downloadFlags
 }
 
 const (
@@ -119,6 +132,12 @@ func run(ctx context.Context, args []string) error {
 		return runCatalog(commandContext, httpClient)
 	case "tile":
 		return runTile(commandContext, httpClient, config.Tile)
+	case "square":
+		square, err := tilequery.ParseSquare(config.Square.Z + "/" + config.Square.X + "/" + config.Square.Y)
+		if err != nil {
+			return markArgumentError(err)
+		}
+		return runDownload(commandContext, httpClient, config.Square.downloadFlags, tilequery.Query{Square: &square})
 	default:
 		return markArgumentError(fmt.Errorf("client command %q is not supported", parsed.Command()))
 	}
@@ -139,16 +158,20 @@ func runCatalog(ctx context.Context, httpClient *client.Client) error {
 }
 
 func runTile(ctx context.Context, httpClient *client.Client, command tileCommand) error {
+	cell, err := client.ParseCell(command.Cell)
+	if err != nil {
+		return markArgumentError(err)
+	}
+	return runDownload(ctx, httpClient, command.downloadFlags, tilequery.Query{Cell: cell.String()})
+}
+
+func runDownload(ctx context.Context, httpClient *client.Client, command downloadFlags, query tilequery.Query) error {
 	started := time.Now()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("tile command canceled: %w", err)
 	}
 	if httpClient == nil {
 		return errors.New("tile command HTTP client is nil")
-	}
-	cell, err := client.ParseCell(command.Cell)
-	if err != nil {
-		return markArgumentError(err)
 	}
 	if command.Output == "" {
 		return markArgumentError(errors.New("tile command output is required"))
@@ -170,7 +193,13 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 			maxDownloadBytes = catalogResponse.MaxTileBytes
 		}
 	}
-	response, err := httpClient.RequestTile(ctx, cell.String(), catalogVersion, command.IfNoneMatch) //nolint:bodyclose // DownloadTileResponse consumes the response body.
+	var response *http.Response
+	var err error
+	if query.Square != nil {
+		response, err = httpClient.RequestSquare(ctx, *query.Square, catalogVersion, command.IfNoneMatch) //nolint:bodyclose // DownloadTileResponse consumes the response body.
+	} else {
+		response, err = httpClient.RequestTile(ctx, query.Cell, catalogVersion, command.IfNoneMatch) //nolint:bodyclose // DownloadTileResponse consumes the response body.
+	}
 	if err != nil {
 		return err
 	}
@@ -186,18 +215,20 @@ func runTile(ctx context.Context, httpClient *client.Client, command tileCommand
 		return fmt.Errorf("download tile: %w", err)
 	}
 	result := struct {
-		Cell            string `json:"cell"`
-		Release         string `json:"release,omitempty"`
-		CatalogVersion  string `json:"catalog_version"`
-		ProjectionID    string `json:"projection_id,omitempty"`
-		Status          int    `json:"status"`
-		ETag            string `json:"etag,omitempty"`
-		DownloadedBytes int64  `json:"downloaded_bytes,omitempty"`
-		PublishedPath   string `json:"published_path,omitempty"`
-		NotModified     bool   `json:"not_modified,omitempty"`
-		ElapsedMS       int64  `json:"elapsed_ms"`
+		Cell            string            `json:"cell,omitempty"`
+		Square          *tilequery.Square `json:"square,omitempty"`
+		Release         string            `json:"release,omitempty"`
+		CatalogVersion  string            `json:"catalog_version"`
+		ProjectionID    string            `json:"projection_id,omitempty"`
+		Status          int               `json:"status"`
+		ETag            string            `json:"etag,omitempty"`
+		DownloadedBytes int64             `json:"downloaded_bytes,omitempty"`
+		PublishedPath   string            `json:"published_path,omitempty"`
+		NotModified     bool              `json:"not_modified,omitempty"`
+		ElapsedMS       int64             `json:"elapsed_ms"`
 	}{
-		Cell:            cell.String(),
+		Cell:            query.Cell,
+		Square:          query.Square,
 		Release:         downloadResult.Release,
 		CatalogVersion:  catalogVersion,
 		ProjectionID:    downloadResult.ProjectionID,

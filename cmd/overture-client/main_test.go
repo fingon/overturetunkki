@@ -23,43 +23,53 @@ import (
 )
 
 func TestRunDiscoversCatalogForTile(t *testing.T) {
-	cell := "8928308280fffff"
-	outputPath := filepath.Join(t.TempDir(), "tile.parquet")
-	tileBody := readTestFixture(t, "geoparquet/empty.parquet")
-	tileDigest := sha256.Sum256(tileBody)
-	var catalogCalls, tileCalls int
-	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/catalog":
-			catalogCalls++
-			responseWriter.Header().Set("Content-Type", "application/json")
-			_, err := responseWriter.Write(readTestFixture(t, "client/catalog.json"))
-			assert.NilError(t, err)
-		case "/v1/tiles/places/" + cell:
-			tileCalls++
-			assert.Equal(t, request.URL.Query().Get("catalog_version"), "2026-09-23.1+sha256:test")
-			writeTileResponse(t, responseWriter, tileResponse{
-				body:           tileBody,
-				release:        "2026-09-23.1",
-				catalogVersion: "2026-09-23.1+sha256:test",
-				projectionID:   "sha256:projection",
-				etag:           `"sha256:` + hex.EncodeToString(tileDigest[:]) + `"`,
+	for _, test := range []struct {
+		name     string
+		tilePath string
+		args     []string
+	}{
+		{name: "H3", tilePath: "8928308280fffff", args: []string{"tile", "8928308280fffff"}},
+		{name: "XYZ", tilePath: "xyz/10/583/296", args: []string{"square", "10", "583", "296"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "tile.parquet")
+			tileBody := readTestFixture(t, "geoparquet/empty.parquet")
+			tileDigest := sha256.Sum256(tileBody)
+			var catalogCalls, tileCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/v1/catalog":
+					catalogCalls++
+					responseWriter.Header().Set("Content-Type", "application/json")
+					_, err := responseWriter.Write(readTestFixture(t, "client/catalog.json"))
+					assert.NilError(t, err)
+				case "/v1/tiles/places/" + test.tilePath:
+					tileCalls++
+					assert.Equal(t, request.URL.Query().Get("catalog_version"), "2026-09-23.1+sha256:test")
+					writeTileResponse(t, responseWriter, tileResponse{
+						body:           tileBody,
+						release:        "2026-09-23.1",
+						catalogVersion: "2026-09-23.1+sha256:test",
+						projectionID:   "sha256:projection",
+						etag:           `"sha256:` + hex.EncodeToString(tileDigest[:]) + `"`,
+					})
+				default:
+					http.NotFound(responseWriter, request)
+				}
+			}))
+			defer server.Close()
+			output := captureOutput(t, func() error {
+				return run(context.Background(), append(append([]string{"--server-url=" + server.URL}, test.args...), "--output="+outputPath))
 			})
-		default:
-			http.NotFound(responseWriter, request)
-		}
-	}))
-	defer server.Close()
-	output := captureOutput(t, func() error {
-		return run(context.Background(), []string{"--server-url=" + server.URL, "tile", cell, "--output=" + outputPath})
-	})
-	assert.NilError(t, output.err)
-	assert.Equal(t, catalogCalls, 1)
-	assert.Equal(t, tileCalls, 1)
-	assert.Assert(t, bytes.Contains(output.body, []byte(`"status":200`)))
-	actual, err := os.ReadFile(outputPath)
-	assert.NilError(t, err)
-	assert.DeepEqual(t, actual, tileBody)
+			assert.NilError(t, output.err)
+			assert.Equal(t, catalogCalls, 1)
+			assert.Equal(t, tileCalls, 1)
+			assert.Assert(t, bytes.Contains(output.body, []byte(`"status":200`)))
+			actual, err := os.ReadFile(outputPath)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, actual, tileBody)
+		})
+	}
 }
 
 func TestRunCatalogWritesGoldenJSON(t *testing.T) {

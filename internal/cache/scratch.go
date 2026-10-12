@@ -91,6 +91,23 @@ func (reservation *ScratchReservation) Release() error {
 	return nil
 }
 
+func (reservation *ScratchReservation) Shrink(bytes int64) error {
+	if reservation == nil || reservation.pool == nil {
+		return ErrInvalidScratchReservation
+	}
+	pool := reservation.pool
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if reservation.released || bytes <= 0 || bytes > reservation.bytes {
+		return ErrInvalidScratchReservation
+	}
+	pool.reservedBytes -= reservation.bytes - bytes
+	reservation.bytes = bytes
+	close(pool.capacityChanged)
+	pool.capacityChanged = make(chan struct{})
+	return nil
+}
+
 func (pool *ScratchPool) Stats() ScratchStats {
 	if pool == nil {
 		return ScratchStats{}

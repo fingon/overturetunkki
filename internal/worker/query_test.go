@@ -122,7 +122,7 @@ func TestBuildCandidateQueryBindsManifestAndFiltersExactly(t *testing.T) {
 	assert.Assert(t, !strings.Contains(query.SQL, snapshot.Manifest[0].Href), query.SQL)
 	assert.Equal(t, query.Args[0], snapshot.Manifest[0].Href)
 	assert.Equal(t, query.Args[1], snapshot.Manifest[1].Href)
-	assert.Equal(t, query.Args[len(query.Args)-2], uint64(cell))
+	assert.Equal(t, query.Args[len(query.Args)-4], uint64(cell))
 	assert.Equal(t, query.Args[len(query.Args)-1], int64(8))
 }
 

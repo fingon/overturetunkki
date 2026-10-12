@@ -85,9 +85,9 @@ items below are completed;
 
 - [x] Count distinct tiles for HTTP admission, recheck caches after scheduling,
   and retain running builds for later callers after the last caller detaches.
-- [x] Derive smaller tiles from complete compatible cached coverage at one
-  coarser resolution, with boundary neighbors, bounded source count, pinned
-  readers, upstream fallback, and the existing output limits and validation.
+- [x] Derive smaller XYZ squares from a compatible cached ancestor, with pinned
+  readers, upstream fallback on a cache miss, and existing output limits and
+  validation. H3 composition uses at most four square sources.
 - [x] Configure minimum H3 resolution through flag/environment (default 2),
   reject coarser tiles before freshness/cache/build work, advertise the allowed
   range, and test configuration and fast rejection.
@@ -157,3 +157,10 @@ items below are completed;
   cache hit took 273 ms. Removing fallback scans reduced the fresh request to
   10.9 seconds, 24 GETs, and 6.8 MiB with identical output. Current tiles cover
   only the valid-bbox subset, with new projection identity.
+
+- [x] Add OpenStreetMap XYZ square queries (zooms 0–22) and the CLI square
+  command. Cache only squares, deriving smaller squares from cached ancestors.
+  Compose H3 responses from at most four square fetches with exact membership
+  and bounded temporary storage. Reject oversized sources immediately without
+  recursive subdivision or alternate-cover retries. Omit polar POIs outside
+  the Web Mercator latitude range and return valid empty polar responses.

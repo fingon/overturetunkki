@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/fingon/overturetunkki/internal/cache"
-	"github.com/fingon/overturetunkki/internal/h3filter"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/fingon/overturetunkki/internal/worker"
-	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
 
@@ -39,19 +38,16 @@ func TestCachedSourcesRequireCompleteCompatibleCoverage(t *testing.T) {
 			assert.NilError(t, err)
 			t.Cleanup(func() { assert.NilError(t, tileCache.Close()) })
 			provider := &tileProvider{cache: tileCache}
-			cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, 9)
-			assert.NilError(t, err)
-			key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Cell: cell.String(), SizePolicyID: testSourcePolicyID}
-			cells, err := h3filter.CoveringCells(cell, cell.Resolution()-1)
-			assert.NilError(t, err)
-			assert.Assert(t, len(cells) > 1)
+			square := tilequery.Square{Z: 10, X: 583, Y: 296}
+			key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Tile: square.String(), SizePolicyID: testSourcePolicyID}
+			squares := []tilequery.Square{square.Parent()}
 			var keys []cache.Key
-			for index, sourceCell := range cells {
-				if test.missing && index == len(cells)-1 {
+			for index, sourceCell := range squares {
+				if test.missing && index == len(squares)-1 {
 					continue
 				}
 				sourceKey := key
-				sourceKey.Cell = sourceCell.String()
+				sourceKey.Tile = sourceCell.String()
 				switch test.mismatch {
 				case testSourceCatalogVersion:
 					sourceKey.CatalogVersion = "different"
@@ -63,13 +59,13 @@ func TestCachedSourcesRequireCompleteCompatibleCoverage(t *testing.T) {
 				publishSource(t, tileCache, sourceKey)
 				keys = append(keys, sourceKey)
 			}
-			sources, err := provider.cachedSources(key, cell)
+			sources, err := provider.cachedSources(key, square)
 			assert.NilError(t, err)
 			if test.missing || test.mismatch != "" {
 				assert.Equal(t, len(sources.paths), 0)
 			} else {
-				assert.Equal(t, len(sources.paths), len(cells))
-				assert.Equal(t, sources.sizeBytes, int64(len(cells)))
+				assert.Equal(t, len(sources.paths), len(squares))
+				assert.Equal(t, sources.sizeBytes, int64(len(squares)))
 				for _, sourceKey := range keys {
 					assert.Assert(t, errors.Is(tileCache.Remove(sourceKey), cache.ErrEntryPinned))
 				}
@@ -97,22 +93,20 @@ func TestCachedSourcesTryCoarserCoverageAndSurfaceReadErrors(t *testing.T) {
 	assert.NilError(t, err)
 	t.Cleanup(func() { assert.NilError(t, tileCache.Close()) })
 	provider := &tileProvider{cache: tileCache}
-	cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, 9)
-	assert.NilError(t, err)
-	key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Cell: cell.String(), SizePolicyID: testSourcePolicyID}
-	cells, err := h3filter.CoveringCells(cell, cell.Resolution()-2)
-	assert.NilError(t, err)
-	for _, sourceCell := range cells {
+	square := tilequery.Square{Z: 10, X: 583, Y: 296}
+	key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Tile: square.String(), SizePolicyID: testSourcePolicyID}
+	squares := []tilequery.Square{square.Parent().Parent()}
+	for _, sourceCell := range squares {
 		sourceKey := key
-		sourceKey.Cell = sourceCell.String()
+		sourceKey.Tile = sourceCell.String()
 		publishSource(t, tileCache, sourceKey)
 	}
-	sources, err := provider.cachedSources(key, cell)
+	sources, err := provider.cachedSources(key, square)
 	assert.NilError(t, err)
-	assert.Equal(t, len(sources.paths), len(cells))
+	assert.Equal(t, len(sources.paths), len(squares))
 	assert.NilError(t, sources.Close())
 	assert.NilError(t, os.Remove(sources.paths[len(sources.paths)-1]))
-	_, err = provider.cachedSources(key, cell)
+	_, err = provider.cachedSources(key, square)
 	assert.Assert(t, err != nil)
 	assert.Assert(t, errors.Is(err, os.ErrNotExist))
 	// Successfully closing the cache also verifies partial selection released pins.
@@ -126,12 +120,12 @@ func TestTileBuildRechecksPositiveAndNegativeCache(t *testing.T) {
 	assert.NilError(t, err)
 	t.Cleanup(func() { assert.NilError(t, negative.Close()) })
 	provider := &tileProvider{cache: tileCache, negative: negative}
-	key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Cell: testSourceCell, SizePolicyID: testSourcePolicyID}
+	key := cache.Key{CatalogVersion: testSourceCatalogVersion, ProjectionID: testSourceProjectionID, Tile: testSourceCell, SizePolicyID: testSourcePolicyID}
 	for _, cached := range []bool{false, true} {
 		t.Run(map[bool]string{false: "negative", true: "positive"}[cached], func(t *testing.T) {
 			currentKey := key
 			if cached {
-				currentKey.Cell = "positive"
+				currentKey.Tile = "positive"
 				publishSource(t, tileCache, currentKey)
 			} else {
 				rejection, rejectionErr := cache.NewSizeRejection(currentKey, cache.RejectionLimitRows, 2, 1)

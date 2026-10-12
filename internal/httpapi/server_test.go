@@ -23,6 +23,7 @@ import (
 	"github.com/fingon/overturetunkki/internal/cache"
 	"github.com/fingon/overturetunkki/internal/catalog"
 	"github.com/fingon/overturetunkki/internal/config"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
@@ -82,11 +83,12 @@ func (observer *testObserver) setSnapshot(snapshot catalog.Snapshot) {
 }
 
 type testProvider struct {
-	mu    sync.Mutex
-	tile  Tile
-	err   error
-	calls int
-	onGet func()
+	lastQuery tilequery.Query
+	mu        sync.Mutex
+	tile      Tile
+	err       error
+	calls     int
+	onGet     func()
 }
 
 type trackingTileReader struct {
@@ -107,7 +109,7 @@ type blockingProvider struct {
 	once    sync.Once
 }
 
-func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Generation, _ h3.Cell) (Tile, error) {
+func (provider *blockingProvider) Get(ctx context.Context, _ catalog.Generation, _ tilequery.Query) (Tile, error) {
 	provider.once.Do(func() { close(provider.started) })
 	select {
 	case <-provider.release:
@@ -148,9 +150,10 @@ func (writer *deadlineResponseWriter) deadlineValues() []time.Time {
 	return append([]time.Time(nil), writer.deadlines...)
 }
 
-func (provider *testProvider) Get(context.Context, catalog.Generation, h3.Cell) (Tile, error) {
+func (provider *testProvider) Get(_ context.Context, _ catalog.Generation, query tilequery.Query) (Tile, error) {
 	provider.mu.Lock()
 	provider.calls++
+	provider.lastQuery = query
 	tile, err, onGet := provider.tile, provider.err, provider.onGet
 	provider.mu.Unlock()
 	if onGet != nil {
@@ -663,7 +666,7 @@ func TestServerDuplicateTilesShareAdmission(t *testing.T) {
 	}
 	<-provider.started
 	deadline := time.Now().Add(time.Second)
-	key := tileAdmissionKey{catalogVersion: observer.snapshot.CatalogVersion, projectionID: observer.snapshot.ProjectionID, cell: cell}
+	key := tileAdmissionKey{catalogVersion: observer.snapshot.CatalogVersion, projectionID: observer.snapshot.ProjectionID, tile: cell.String()}
 	for {
 		server.stateMu.Lock()
 		count := server.tileAdmissions[key]

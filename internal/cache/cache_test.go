@@ -35,7 +35,7 @@ func TestCacheOwnershipHashingAndStaging(t *testing.T) {
 	path, err := cache.Path(key)
 	assert.NilError(t, err)
 	assert.Assert(t, strings.HasSuffix(path, fileSuffix))
-	assert.Assert(t, !strings.Contains(path, key.Cell))
+	assert.Assert(t, !strings.Contains(path, key.Tile))
 	relative, err := filepath.Rel(root, path)
 	assert.NilError(t, err)
 	assert.Assert(t, !strings.HasPrefix(relative, ".."))
@@ -66,6 +66,71 @@ func TestCacheOwnershipHashingAndStaging(t *testing.T) {
 		assert.Assert(t, errors.Is(statErr, os.ErrNotExist))
 		assert.NilError(t, reopened.Close())
 	}
+}
+
+func TestTileReservationEvictsUnpinnedAndRejectsPinnedSources(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pinned=%t", pinned), func(t *testing.T) {
+			tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 10, MaxEntries: 2})
+			assert.NilError(t, err)
+			t.Cleanup(func() { assert.NilError(t, tileCache.Close()) })
+			key := testKey()
+			tileCache.publishTestEntry(t, key, 6, key.CatalogVersion)
+			if pinned {
+				reader, openErr := tileCache.Open(key)
+				assert.NilError(t, openErr)
+				defer func() { assert.NilError(t, reader.Close()) }()
+			}
+			other := key
+			other.Tile = "xyz/1/0/0"
+			reservation, reserveErr := tileCache.ReserveTile(t.Context(), other, 10)
+			if pinned {
+				assert.Assert(t, errors.Is(reserveErr, ErrCapacityUnavailable))
+				assert.Assert(t, reservation == nil)
+				return
+			}
+			assert.NilError(t, reserveErr)
+			assert.Equal(t, tileCache.Stats().UsedBytes, int64(0))
+			assert.NilError(t, reservation.Release())
+		})
+	}
+}
+
+func TestCacheRemovesLegacyH3Sidecars(t *testing.T) {
+	options := Options{Root: t.TempDir(), MaxBytes: 100, MaxEntries: 4}
+	tileCache, err := New(options)
+	assert.NilError(t, err)
+	key := testKey()
+	entry := tileCache.publishTestEntry(t, key, 6, key.CatalogVersion)
+	assert.NilError(t, tileCache.Close())
+	metadata, err := os.ReadFile(entry.SidecarPath)
+	assert.NilError(t, err)
+	metadata = bytes.ReplaceAll(metadata, []byte(`"tile"`), []byte(`"cell"`))
+	assert.NilError(t, os.WriteFile(entry.SidecarPath, metadata, 0o600))
+	reopened, err := New(options)
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, reopened.Close()) }()
+	assert.Equal(t, reopened.Stats().UsedEntries, int64(0))
+	_, err = os.Stat(entry.Path)
+	assert.Assert(t, errors.Is(err, os.ErrNotExist))
+}
+
+func TestTransientJobsSkipCacheReservationsAndHonorDeadline(t *testing.T) {
+	tileCache, err := New(Options{Root: t.TempDir(), MaxBytes: 10, MaxEntries: 1})
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, tileCache.Close()) }()
+	reservation, err := tileCache.Reserve(t.Context(), 10)
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, reservation.Release()) }()
+	scheduler, err := NewScheduler(tileCache, SchedulerOptions{Workers: 1, QueueCapacity: 1, Timeout: 20 * time.Millisecond})
+	assert.NilError(t, err)
+	defer func() { assert.NilError(t, scheduler.Close()) }()
+	called := false
+	assert.NilError(t, scheduler.DoTransient(t.Context(), testKey(), func(context.Context) error { called = true; return nil }))
+	assert.Assert(t, called)
+	err = scheduler.Do(t.Context(), testKey(), 10, func(context.Context, *Reservation) error { return errors.New("unexpected build") })
+	assert.Assert(t, errors.Is(err, context.DeadlineExceeded))
+	assert.Equal(t, tileCache.Stats().ReservedBytes, int64(10))
 }
 
 func TestCacheReservationsBoundBytesAndEntries(t *testing.T) {
@@ -176,7 +241,7 @@ func TestCachePublishesPinsEvictsAndPersists(t *testing.T) {
 	currentKey.CatalogVersion = "new-release"
 	newKey := testKey()
 	newKey.CatalogVersion = "new-release"
-	newKey.Cell = "8928308280ffffe"
+	newKey.Tile = "8928308280ffffe"
 	oldEntry := cache.publishTestEntry(t, oldKey, 4, "new-release")
 	_ = cache.publishTestEntry(t, currentKey, 4, "new-release")
 	thirdEntry := cache.publishTestEntry(t, newKey, 4, "new-release")
@@ -254,7 +319,7 @@ func TestCacheRemovesOrphanFilesAtStartup(t *testing.T) {
 		return
 	}
 	sidecarKey := testKey()
-	sidecarKey.Cell = "8928308280ffffe"
+	sidecarKey.Tile = "8928308280ffffe"
 	sidecarPath, err := cache.Path(sidecarKey)
 	assert.NilError(t, err)
 	assert.NilError(t, cache.Close())
@@ -356,7 +421,7 @@ func TestCachePinnedCapacityAndCorruptStartupCleanup(t *testing.T) {
 		return
 	}
 	otherKey := key
-	otherKey.Cell = "8928308280ffffe"
+	otherKey.Tile = "8928308280ffffe"
 	staging, err := cache.CreateStaging(otherKey)
 	assert.NilError(t, err)
 	if err != nil {
@@ -480,10 +545,10 @@ func TestSchedulerRunsDifferentKeysInParallel(t *testing.T) {
 	}
 	firstKey := testKey()
 	secondKey := firstKey
-	secondKey.Cell = "8928308280ffffe"
+	secondKey.Tile = "8928308280ffffe"
 	results := make(chan error, 2)
-	go func() { results <- scheduler.Do(context.Background(), firstKey, 10, build(firstKey.Cell)) }()
-	go func() { results <- scheduler.Do(context.Background(), secondKey, 10, build(secondKey.Cell)) }()
+	go func() { results <- scheduler.Do(context.Background(), firstKey, 10, build(firstKey.Tile)) }()
+	go func() { results <- scheduler.Do(context.Background(), secondKey, 10, build(secondKey.Tile)) }()
 	for range 2 {
 		select {
 		case <-started:
@@ -620,7 +685,7 @@ func TestSchedulerCanceledQueuedJobCanBeRetried(t *testing.T) {
 	}()
 	<-started
 	queuedKey := key
-	queuedKey.Cell = "queued"
+	queuedKey.Tile = "queued"
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	queued := make(chan error, 1)
@@ -694,13 +759,13 @@ func TestSchedulerRejectsFullQueueAndClosedState(t *testing.T) {
 	defer cancel()
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- scheduler.Do(secondContext, Key{CatalogVersion: "release-2", ProjectionID: "projection", Cell: "cell-2", SizePolicyID: "size"}, 10, func(context.Context, *Reservation) error { return nil })
+		secondDone <- scheduler.Do(secondContext, Key{CatalogVersion: "release-2", ProjectionID: "projection", Tile: "cell-2", SizePolicyID: "size"}, 10, func(context.Context, *Reservation) error { return nil })
 	}()
 	deadline := time.Now().Add(time.Second)
 	for len(scheduler.queue) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	err = scheduler.Do(context.Background(), Key{CatalogVersion: "release-3", ProjectionID: "projection", Cell: "cell-3", SizePolicyID: "size"}, 10, func(context.Context, *Reservation) error { return nil })
+	err = scheduler.Do(context.Background(), Key{CatalogVersion: "release-3", ProjectionID: "projection", Tile: "cell-3", SizePolicyID: "size"}, 10, func(context.Context, *Reservation) error { return nil })
 	assert.Assert(t, errors.Is(err, ErrQueueFull))
 	cancel()
 	assert.Assert(t, errors.Is(<-secondDone, context.Canceled))
@@ -714,7 +779,7 @@ func testKey() Key {
 	return Key{
 		CatalogVersion: "release+sha256:catalog",
 		ProjectionID:   "sha256:projection",
-		Cell:           "8928308280fffff",
+		Tile:           "8928308280fffff",
 		SizePolicyID:   "sha256:size-policy",
 	}
 }

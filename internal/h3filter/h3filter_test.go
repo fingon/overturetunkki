@@ -166,10 +166,10 @@ func TestCellBoundsAreConservative(t *testing.T) {
 		cell h3.Cell
 	}{
 		{name: "ordinary cell", cell: normalCell},
-		{name: testCoverageFaceCrossing, cell: h3.CellFromString(reportedFaceCrossingCell)},
+		{name: "face crossing", cell: h3.CellFromString(reportedFaceCrossingCell)},
 		{name: "face crossing neighbor", cell: h3.CellFromString("85194da3fffffff")},
 		{name: "face crossing neighbor west", cell: h3.CellFromString("851fa4dbfffffff")},
-		{name: testCoveragePentagon, cell: pentagons[0]},
+		{name: "pentagon", cell: pentagons[0]},
 		{name: "pole", cell: poleCell},
 		{name: "antimeridian", cell: antimeridianCell},
 	}

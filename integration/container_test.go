@@ -123,6 +123,25 @@ func TestContainerLifecycle(t *testing.T) {
 		emptyBody, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: catalog.CatalogVersion, cell: emptyCell, wantStatus: http.StatusOK})
 		validateTile(t, emptyBody)
 		assert.DeepEqual(t, tileIDs(t, emptyBody), []string{})
+		t.Run("XYZ CLI download and conditional response", func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "square.parquet")
+			stdout, stderr, err := runCLI(t, clientBinary, "--server-url="+container.url(""), "square", "10", "163", "395", "--output", outputPath)
+			assert.NilError(t, err, string(stderr))
+			var result struct {
+				Status int    `json:"status"`
+				ETag   string `json:"etag"`
+			}
+			assert.NilError(t, json.Unmarshal(stdout, &result))
+			assert.Equal(t, result.Status, http.StatusOK)
+			squareBody, readErr := os.ReadFile(outputPath)
+			assert.NilError(t, readErr)
+			validateTile(t, squareBody)
+			assert.DeepEqual(t, tileIDs(t, squareBody), []string{"poi-2"})
+			stdout, stderr, err = runCLI(t, clientBinary, "--server-url="+container.url(""), "square", "10", "163", "395", "--output", outputPath, "--if-none-match", result.ETag)
+			assert.NilError(t, err, string(stderr))
+			assert.NilError(t, json.Unmarshal(stdout, &result))
+			assert.Equal(t, result.Status, http.StatusNotModified)
+		})
 		fixture.setWideBounds(rolloverRelease, true)
 		defer fixture.setWideBounds(fixtureRelease, false)
 		unprunedCatalog := waitForCatalogRelease(t, client, container.url("/v1/catalog"), rolloverRelease)

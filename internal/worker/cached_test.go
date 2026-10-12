@@ -14,6 +14,7 @@ import (
 
 	"github.com/fingon/overturetunkki/internal/geoparquet"
 	"github.com/fingon/overturetunkki/internal/h3filter"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
@@ -66,20 +67,25 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 			fields := []string{"id", "geometry", "names"}
 			plan, err := BuildQueryPlan(TileRequest{Cell: cell.String()}, fields, snapshot.Schema)
 			assert.NilError(t, err)
-			cells, err := h3filter.CoveringCells(cell, cell.Resolution()-1)
+			rectangles := make([]tilequery.Rect, 0, len(bounds.LongitudeIntervals))
+			for _, interval := range bounds.LongitudeIntervals {
+				rectangles = append(rectangles, tilequery.Rect{WestDeg: interval.MinDeg, EastDeg: interval.MaxDeg, SouthDeg: bounds.LatitudeMinDeg, NorthDeg: bounds.LatitudeMaxDeg})
+			}
+			cells, err := tilequery.Cover(rectangles)
 			assert.NilError(t, err)
 			directory := t.TempDir()
 			paths := make([]string, 0, len(cells))
 			for _, coveringCell := range cells {
-				sourcePlan, planErr := BuildQueryPlan(TileRequest{Cell: coveringCell.String()}, fields, snapshot.Schema)
+				sourcePlan, planErr := BuildQueryPlan(TileRequest{Square: &coveringCell}, fields, snapshot.Schema)
 				assert.NilError(t, planErr)
 				metadata, metadataErr := candidateMetadata(sourcePlan)
 				assert.NilError(t, metadataErr)
-				sourcePath := filepath.Join(directory, coveringCell.String()+".parquet")
-				sql := fmt.Sprintf("SELECT %s FROM points WHERE h3_cell_contains(ST_Y(geometry), ST_X(geometry), CAST(%d AS UBIGINT))", candidateProjectionSQL(plan.Columns), uint64(coveringCell))
+				sourcePath := filepath.Join(directory, fmt.Sprintf("%d-%d-%d.parquet", coveringCell.Z, coveringCell.X, coveringCell.Y))
+				sql := fmt.Sprintf("SELECT %s FROM points WHERE %s", candidateProjectionSQL(plan.Columns), sourcePlan.membershipSQL())
+
 				copySQL, copyErr := geoparquet.CopySQL(sql, sourcePath, metadata)
 				assert.NilError(t, copyErr)
-				_, err = connection.ExecContext(t.Context(), copySQL)
+				_, err = connection.ExecContext(t.Context(), copySQL, sourcePlan.membershipArgs()...)
 				assert.NilError(t, err)
 				paths = append(paths, sourcePath)
 			}
@@ -175,7 +181,7 @@ func TestCachedCandidateQueryRejectsInvalidSources(t *testing.T) {
 		{name: "remote", paths: []string{"https://example.com/tile.parquet"}},
 		{name: "glob", paths: []string{filepath.Join(t.TempDir(), "*.parquet")}},
 		{name: "duplicate", paths: []string{path, path}},
-		{name: "too many", paths: make([]string, h3filter.MaxCoveringCells+1)},
+		{name: "too many", paths: make([]string, tilequery.MaxSources+1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, queryErr := BuildCachedCandidateQuery(plan, test.paths, 100)
@@ -184,5 +190,5 @@ func TestCachedCandidateQueryRejectsInvalidSources(t *testing.T) {
 	}
 	query, err := BuildCachedCandidateQuery(plan, []string{path}, 100)
 	assert.NilError(t, err)
-	assert.DeepEqual(t, query.Args, []any{path, plan.CellValue, int64(101)})
+	assert.DeepEqual(t, query.Args, []any{path, plan.CellValue, -tilequery.LatitudeLimitDeg, tilequery.LatitudeLimitDeg, int64(101)})
 }

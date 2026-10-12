@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/uber/h3-go/v4"
 )
 
@@ -34,11 +35,16 @@ type CatalogResponse struct {
 	Fields                 []string `json:"fields"`
 	MaxTileBytes           int64    `json:"max_tile_bytes"`
 	MaxTileRows            int64    `json:"max_tile_rows"`
+	SupportedXYZZooms      []int    `json:"supported_xyz_zooms"`
 	SupportedH3Resolutions []int    `json:"supported_h3_resolutions"`
 	Attribution            []string `json:"attribution"`
 }
 
 type ErrorResponse struct {
+	Zoom                *int   `json:"zoom,omitempty"`
+	X                   *int   `json:"x,omitempty"`
+	Y                   *int   `json:"y,omitempty"`
+	SuggestedZoom       *int   `json:"suggested_zoom,omitempty"`
 	Code                string `json:"code"`
 	Message             string `json:"message"`
 	Retryable           bool   `json:"retryable"`
@@ -106,16 +112,9 @@ func (err *HTTPError) Diagnostic() string {
 			details = append(details, fmt.Sprintf("cell %q is at resolution %d", err.API.Cell, *err.API.Resolution))
 		}
 		if err.HasAPI && err.API.CanRefine != nil {
-			if *err.API.CanRefine {
-				if err.API.SuggestedResolution != nil {
-					details = append(details, fmt.Sprintf("request a finer resolution such as %d", *err.API.SuggestedResolution))
-				} else {
-					details = append(details, "request a finer H3 resolution")
-				}
-			} else {
-				details = append(details, "resolution 15 is terminal; omit this tile or use a deployment with different limits")
-			}
+			details = append(details, err.API.refinementDiagnostic())
 		}
+
 		if err.HasAPI && err.API.Guidance != "" {
 			details = append(details, "coverage guidance: "+err.API.Guidance)
 		}
@@ -134,6 +133,21 @@ func (err *HTTPError) Diagnostic() string {
 		return err.Error()
 	}
 	return err.Error() + "; " + strings.Join(details, "; ")
+}
+
+func (response ErrorResponse) refinementDiagnostic() string {
+	switch {
+	case !*response.CanRefine && response.Zoom != nil:
+		return "maximum XYZ zoom is terminal; omit this tile or use a deployment with different limits"
+	case !*response.CanRefine:
+		return "resolution 15 is terminal; omit this tile or use a deployment with different limits"
+	case response.SuggestedZoom != nil:
+		return fmt.Sprintf("request all four children at zoom %d", *response.SuggestedZoom)
+	case response.SuggestedResolution != nil:
+		return fmt.Sprintf("request a finer resolution such as %d", *response.SuggestedResolution)
+	default:
+		return "request a finer H3 resolution"
+	}
 }
 
 func (err *HTTPError) Unwrap() error {
@@ -178,6 +192,17 @@ func (client *Client) RequestTile(ctx context.Context, cell, catalogVersion, ifN
 	if err != nil {
 		return nil, err
 	}
+	return client.requestTilePath(ctx, parsedCell.String(), catalogVersion, ifNoneMatch)
+}
+
+func (client *Client) RequestSquare(ctx context.Context, square tilequery.Square, catalogVersion, ifNoneMatch string) (*http.Response, error) {
+	if err := square.Validate(); err != nil {
+		return nil, err
+	}
+	return client.requestTilePath(ctx, square.String(), catalogVersion, ifNoneMatch)
+}
+
+func (client *Client) requestTilePath(ctx context.Context, tilePath, catalogVersion, ifNoneMatch string) (*http.Response, error) {
 	if catalogVersion == "" {
 		return nil, errors.New("catalog version must not be empty")
 	}
@@ -186,7 +211,7 @@ func (client *Client) RequestTile(ctx context.Context, cell, catalogVersion, ifN
 	if ifNoneMatch != "" {
 		headers.Set("If-None-Match", ifNoneMatch)
 	}
-	return client.Request(ctx, RequestOptions{Method: http.MethodGet, Path: TilePathPrefix + parsedCell.String(), Query: query, Headers: headers})
+	return client.Request(ctx, RequestOptions{Method: http.MethodGet, Path: TilePathPrefix + tilePath, Query: query, Headers: headers})
 }
 
 func ParseCell(value string) (h3.Cell, error) {

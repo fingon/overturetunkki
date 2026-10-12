@@ -303,6 +303,13 @@ func (*cellContainsUDF) Config() duckdb.ScalarFuncConfig {
 
 func (*cellContainsUDF) Executor() duckdb.ScalarFuncExecutor {
 	return duckdb.ScalarFuncExecutor{
+		// Bind once so parallel callbacks never mutate DuckDB's shared context.
+		ScalarBinder: func(ctx context.Context, _ []duckdb.ScalarUDFArg) (context.Context, error) {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			return ctx, ctx.Err()
+		},
 		ChunkContextExecutor: func(ctx context.Context, chunk *duckdb.ChunkIteratorState) error {
 			for row, err := range chunk.Rows() {
 				if err != nil {

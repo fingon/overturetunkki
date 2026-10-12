@@ -9,6 +9,7 @@ import (
 	"github.com/fingon/overturetunkki/internal/cache"
 	"github.com/fingon/overturetunkki/internal/catalog"
 	"github.com/fingon/overturetunkki/internal/config"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
@@ -67,7 +68,7 @@ func TestTileProviderRemembersOutputSizeRejectionWithoutByteCounts(t *testing.T)
 			key := cache.Key{
 				CatalogVersion: "release",
 				ProjectionID:   testSourceProjectionID,
-				Cell:           test.name,
+				Tile:           test.name,
 				SizePolicyID:   testSourcePolicyID,
 			}
 			assert.NilError(t, provider.rememberSizeRejection(key, test.err))
@@ -102,7 +103,7 @@ func TestTileProviderRejectsCoarseTilesBeforeCache(t *testing.T) {
 	for resolution := range config.DefaultMinTileResolution {
 		cell, err := h3.LatLngToCell(h3.LatLng{Lat: 60.17, Lng: 24.94}, resolution)
 		assert.NilError(t, err)
-		_, err = provider.Get(t.Context(), catalog.Generation{}, cell)
+		_, err = provider.Get(t.Context(), catalog.Generation{}, tilequery.Query{Cell: cell.String()})
 		assert.Assert(t, errors.Is(err, worker.ErrResolutionTooCoarse))
 		tooCoarse, ok := errors.AsType[*worker.ResolutionTooCoarseError](err)
 		assert.Assert(t, ok)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/fingon/overturetunkki/internal/cache"
 	"github.com/fingon/overturetunkki/internal/catalog"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 	"github.com/fingon/overturetunkki/internal/worker"
 	"github.com/uber/h3-go/v4"
 )
@@ -59,7 +60,7 @@ type CatalogObserver interface {
 }
 
 type TileProvider interface {
-	Get(context.Context, catalog.Generation, h3.Cell) (Tile, error)
+	Get(context.Context, catalog.Generation, tilequery.Query) (Tile, error)
 }
 
 type Tile struct {
@@ -108,7 +109,7 @@ type Server struct {
 type tileAdmissionKey struct {
 	catalogVersion string
 	projectionID   string
-	cell           h3.Cell
+	tile           string
 }
 
 type trackingResponseWriter struct {
@@ -123,11 +124,16 @@ type catalogResponse struct {
 	Fields                 []string `json:"fields"`
 	MaxTileBytes           int64    `json:"max_tile_bytes"`
 	MaxTileRows            int64    `json:"max_tile_rows"`
+	SupportedXYZZooms      []int    `json:"supported_xyz_zooms"`
 	SupportedH3Resolutions []int    `json:"supported_h3_resolutions"`
 	Attribution            []string `json:"attribution"`
 }
 
 type errorResponse struct {
+	Zoom                *int   `json:"zoom,omitempty"`
+	X                   *int   `json:"x,omitempty"`
+	Y                   *int   `json:"y,omitempty"`
+	SuggestedZoom       *int   `json:"suggested_zoom,omitempty"`
 	Code                string `json:"code"`
 	Message             string `json:"message"`
 	Retryable           bool   `json:"retryable"`
@@ -367,6 +373,7 @@ func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *
 		MaxTileBytes:           server.options.MaxTileBytes,
 		MaxTileRows:            server.options.MaxTileRows,
 		SupportedH3Resolutions: supportedH3Resolutions(server.options.MinTileResolution),
+		SupportedXYZZooms:      supportedXYZZooms(),
 		Attribution:            append([]string(nil), server.options.AttributionURL...),
 	})
 }
@@ -381,15 +388,14 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: err.Error()})
 		return
 	}
-	cellText := strings.TrimPrefix(request.URL.Path, "/v1/tiles/places/")
-	cell, err := worker.ParseCanonicalCell(cellText)
+	query, cell, err := parseTileQuery(strings.TrimPrefix(request.URL.Path, "/v1/tiles/places/"))
 	if err != nil {
-		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: "H3 cell is invalid"})
+		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: err.Error()})
 		return
 	}
-	if cell.Resolution() < server.options.MinTileResolution {
+	if query.Square == nil && cell.Resolution() < server.options.MinTileResolution {
 		err := &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: server.options.MinTileResolution}
-		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
+		status, response := classifyQueryError(err, query, server.options.MaxTileBytes)
 		writeError(responseWriter, status, response)
 		return
 	}
@@ -403,7 +409,7 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: "catalog version is stale", Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion})
 		return
 	}
-	admissionKey := tileAdmissionKey{catalogVersion: snapshot.CatalogVersion, projectionID: snapshot.ProjectionID, cell: cell}
+	admissionKey := tileAdmissionKey{catalogVersion: snapshot.CatalogVersion, projectionID: snapshot.ProjectionID, tile: query.String()}
 	if err := server.acquireTile(admissionKey); err != nil {
 		if errors.Is(err, ErrServerShuttingDown) {
 			writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: serverShuttingDownCode, Message: serverShuttingDownMessage, Retryable: true})
@@ -427,19 +433,19 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 	stopGenerationCancellation := context.AfterFunc(generation.Context, cancelBuild)
 	defer stopGenerationCancellation()
 	defer cancelBuild()
-	tile, err := server.provider.Get(buildContext, generation, cell)
+	tile, err := server.provider.Get(buildContext, generation, query)
 	if err != nil {
 		if generation.Context.Err() != nil {
 			current, currentErr := server.observer.Current()
 			if currentErr != nil {
-				slog.Warn("catalog generation fenced during tile build", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", currentErr)
+				slog.Warn("catalog generation fenced during tile build", "request_id", request.Header.Get(requestIDHeader), "tile", query.String(), "error", currentErr)
 				writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 			} else {
 				writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: catalogChangedBeforeResponseMessage, Release: current.Snapshot.Release, CatalogVersion: current.Snapshot.CatalogVersion})
 			}
 			return
 		}
-		status, response := classifyTileError(err, cell, server.options.MaxTileBytes)
+		status, response := classifyQueryError(err, query, server.options.MaxTileBytes)
 		if errors.Is(err, cache.ErrCapacityUnavailable) {
 			server.capacityRejects.Add(1)
 		}
@@ -447,20 +453,20 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		if status < http.StatusInternalServerError || errors.Is(err, context.Canceled) {
 			logLevel = slog.LevelWarn
 		}
-		slog.Log(request.Context(), logLevel, "tile request failed", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "status", status, "error", err)
+		slog.Log(request.Context(), logLevel, "tile request failed", "request_id", request.Header.Get(requestIDHeader), "tile", query.String(), "status", status, "error", err)
 		writeError(responseWriter, status, response)
 		return
 	}
 	latest, err := server.refresh(request.Context())
 	if err != nil {
 		closeTileReader(request, tile)
-		slog.Error("refresh catalog before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "error", err)
+		slog.Error("refresh catalog before tile response", "request_id", request.Header.Get(requestIDHeader), "tile", query.String(), "error", err)
 		writeError(responseWriter, http.StatusServiceUnavailable, errorResponse{Code: catalogUnavailableCode, Message: catalogUnavailableMessage, Retryable: true})
 		return
 	}
 	if latest.CatalogVersion != snapshot.CatalogVersion || latest.Release != snapshot.Release {
 		closeTileReader(request, tile)
-		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "cell", cell.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
+		slog.Warn("catalog changed before tile response", "request_id", request.Header.Get(requestIDHeader), "tile", query.String(), "catalog_version", latest.CatalogVersion, "release", latest.Release)
 		writeError(responseWriter, http.StatusConflict, errorResponse{Code: catalogChangedCode, Message: catalogChangedBeforeResponseMessage, Release: latest.Release, CatalogVersion: latest.CatalogVersion})
 		return
 	}
@@ -636,6 +642,51 @@ func requiredQueryValue(request *http.Request, name string) (string, error) {
 		return "", fmt.Errorf("query parameter %q is required exactly once", name)
 	}
 	return values[0], nil
+}
+
+func parseTileQuery(value string) (tilequery.Query, h3.Cell, error) {
+	if strings.HasPrefix(value, tilequery.XYZPrefix) {
+		square, err := tilequery.ParseSquare(value)
+		return tilequery.Query{Square: &square}, 0, err
+	}
+	cell, err := worker.ParseCanonicalCell(value)
+	return tilequery.Query{Cell: value}, cell, err
+}
+
+func classifyQueryError(err error, query tilequery.Query, maxTileBytes int64) (int, errorResponse) {
+	cell := h3.CellFromString(query.Cell)
+	status, response := classifyTileError(err, cell, maxTileBytes)
+	if status != http.StatusUnprocessableEntity {
+		return status, response
+	}
+	if query.Square != nil {
+		square := *query.Square
+		response.Cell = ""
+		response.Resolution = nil
+		response.SuggestedResolution = nil
+		response.Zoom, response.X, response.Y = &square.Z, &square.X, &square.Y
+		canRefine := square.Z < tilequery.MaxZoom
+		response.CanRefine = &canRefine
+		response.Guidance = "request all four children at the next zoom level"
+		if canRefine {
+			nextZoom := square.Z + 1
+			response.SuggestedZoom = &nextZoom
+		} else {
+			response.Guidance = "maximum XYZ zoom reached; use a deployment with different limits"
+		}
+	}
+	if sourceErr, ok := errors.AsType[*worker.SourceSquareError](err); ok {
+		response.Message = sourceErr.Error()
+	}
+	return status, response
+}
+
+func supportedXYZZooms() []int {
+	zooms := make([]int, tilequery.MaxZoom+1)
+	for index := range zooms {
+		zooms[index] = index
+	}
+	return zooms
 }
 
 func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorResponse) {

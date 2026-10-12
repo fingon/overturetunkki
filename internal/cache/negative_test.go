@@ -17,9 +17,9 @@ func TestNegativeCacheStoresOnlyProvenRejectionsAndEvictsLRU(t *testing.T) {
 	}
 	firstKey := testKey()
 	secondKey := firstKey
-	secondKey.Cell = "8928308280ffffe"
+	secondKey.Tile = "8928308280ffffe"
 	thirdKey := firstKey
-	thirdKey.Cell = "8928308280ffffd"
+	thirdKey.Tile = "8928308280ffffd"
 	first, err := NewSizeRejection(firstKey, RejectionLimitRows, 11, 10)
 	assert.NilError(t, err)
 	second, err := NewSizeRejection(secondKey, RejectionLimitBytes, 101, 100)

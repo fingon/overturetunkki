@@ -5,8 +5,7 @@ import (
 	"fmt"
 
 	"github.com/fingon/overturetunkki/internal/cache"
-	"github.com/fingon/overturetunkki/internal/h3filter"
-	"github.com/uber/h3-go/v4"
+	"github.com/fingon/overturetunkki/internal/tilequery"
 )
 
 type tileSources struct {
@@ -26,16 +25,10 @@ func (sources *tileSources) Close() error {
 	return errors.Join(closeErrors...)
 }
 
-func (provider *tileProvider) cachedSources(key cache.Key, cell h3.Cell) (tileSources, error) {
-	for resolution := cell.Resolution() - 1; resolution >= provider.minResolution; resolution-- {
-		cells, err := h3filter.CoveringCells(cell, resolution)
-		if err != nil {
-			return tileSources{}, err
-		}
-		if len(cells) == 0 {
-			continue
-		}
-		sources, err := provider.openSources(key, cells)
+func (provider *tileProvider) cachedSources(key cache.Key, square tilequery.Square) (tileSources, error) {
+	for square.Z > 0 {
+		square = square.Parent()
+		sources, err := provider.openSources(key, []tilequery.Square{square})
 		if err != nil {
 			return tileSources{}, err
 		}
@@ -46,7 +39,7 @@ func (provider *tileProvider) cachedSources(key cache.Key, cell h3.Cell) (tileSo
 	return tileSources{}, nil
 }
 
-func (provider *tileProvider) openSources(key cache.Key, cells []h3.Cell) (sources tileSources, err error) {
+func (provider *tileProvider) openSources(key cache.Key, squares []tilequery.Square) (sources tileSources, err error) {
 	defer func() {
 		if err != nil {
 			closeErr := sources.Close()
@@ -58,9 +51,9 @@ func (provider *tileProvider) openSources(key cache.Key, cells []h3.Cell) (sourc
 			sources = tileSources{}
 		}
 	}()
-	for _, cell := range cells {
+	for _, square := range squares {
 		sourceKey := key
-		sourceKey.Cell = cell.String()
+		sourceKey.Tile = square.String()
 		reader, openErr := provider.cache.Open(sourceKey)
 		if openErr != nil {
 			return sources, openErr

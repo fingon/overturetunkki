@@ -1,10 +1,11 @@
 # Overture caching container
 
 This repository builds a Go 1.27 service that serves bounded, zstd-compressed
-GeoParquet POI tiles by H3 cell. The service discovers Overture's STAC catalog,
+GeoParquet POI tiles by OpenStreetMap XYZ square or H3 cell. The service discovers Overture's STAC catalog,
 pins each request to a catalog version, queries the places assets through
 DuckDB, selects source partitions by conservative spatial bounds, and keeps
-successful tiles in a bounded disk cache. Spatial pruning also applies to
+successful squares in a bounded disk cache. H3 results are composed from at most
+four squares and returned without persistent H3 caching. Spatial pruning also applies to
 pentagons and tiles crossing H3 face boundaries. Tiles cover places with valid
 source bboxes and exclude missing or malformed bboxes. The HTTP API reports request
 IDs, freshness changes, finer-cell guidance, and retryable
@@ -44,6 +45,7 @@ Inspect the catalog and download one complete tile with the CLI:
 ```sh
 ./bin/overture-client catalog
 ./bin/overture-client tile 8928308280fffff --output tile.parquet
+./bin/overture-client square 10 583 296 --output square.parquet
 ```
 
 The tile command discovers the current catalog first. For reproducible stale
@@ -101,8 +103,8 @@ The service requires `id` and `geometry` in `--fields` and rejects unknown or
 duplicate fields, invalid trusted hosts, nonpositive limits, unwritable cache
 directories, and `cache-max-bytes` below `max-tile-bytes`.
 
-Size resources together: `worker-count` must fit within
-`scratch-max-bytes / max-tile-bytes`; `worker-memory-bytes` applies to each
+Size resources together: `scratch-max-bytes / worker-count` must exceed
+`max-tile-bytes` to leave space for both output and worker spill; `worker-memory-bytes` applies to each
 DuckDB worker, while total process RSS also includes Go, DuckDB, extensions,
 HTTP buffers, and scratch. `cache-max-bytes` includes complete files and
 reservations, including old generations and pinned open readers. Set container
@@ -125,11 +127,24 @@ have the `write-timeout` deadline.
 Successful tile responses use `Cache-Control: no-cache, must-revalidate` and
 304 responses are evaluated only after freshness validation.
 
-Requests for the same tile share one build. Running builds finish caching even
+Requests for the same tile share one build. Running square builds finish caching
 if every client disconnects; catalog changes or validation expiry cancel them.
-Abandoned queued jobs are discarded. Smaller tiles
-can be derived locally when a complete covering set of compatible larger tiles
-is cached, including boundary neighbors; otherwise the service queries upstream.
+Abandoned queued jobs are discarded. A square can be derived from its nearest
+compatible cached ancestor, otherwise it is queried upstream.
+
+Square queries use standard OpenStreetMap XYZ coordinates: zoom 0–22, X from
+west to east, and Y from north to south. The HTTP endpoint is
+`/v1/tiles/places/xyz/{z}/{x}/{y}?catalog_version=...`; responses remain
+GeoParquet, with the same limits and integrity headers as H3 requests.
+
+H3 requests fetch at most four covering squares, reuse their cached ancestors,
+and filter the combined rows by exact H3 membership. If any source square or
+final H3 response exceeds the limits, the server returns `422 tile_too_large`.
+It does not subdivide sources or retry another covering zoom. H3 responses are
+temporary files deleted after the last reader closes. POIs outside the Web
+Mercator latitude range (approximately ±85.0511°) are omitted; wholly polar
+cells return valid empty files, and cells crossing that limit return only their
+in-range POIs.
 
 `OVERTURE_MIN_TILE_RESOLUTION` (or `--min-tile-resolution`) defaults to `2`,
 roughly 300–365 km across using average H3 edge lengths. Requests at lower
@@ -139,7 +154,8 @@ to `0` to allow all H3 resolutions, or raise it to restrict requests further.
 
 The catalog response includes Overture's attribution URL
 (`https://overturemaps.org`) along with the release, catalog version,
-projection identity, selected fields, supported H3 resolutions, and limits.
+projection identity, selected fields, supported H3 resolutions, supported XYZ
+zooms, and limits.
 Clients and deployments should preserve that attribution when presenting or
 storing downloaded data.
 
@@ -153,7 +169,8 @@ Global CLI flags:
 | `--timeout` | `OVERTURE_CLIENT_TIMEOUT` | `60s` for the whole command |
 | `-v`, `--verbose` | `OVERTURE_CLIENT_VERBOSE` | `false` |
 
-`catalog` has no command-specific flags. `tile <h3>` accepts the following:
+`catalog` has no command-specific flags. `tile <h3>` and `square <z> <x> <y>`
+accept the following:
 
 | Flag | Environment | Default |
 | --- | --- | --- |
@@ -163,7 +180,7 @@ Global CLI flags:
 | `--force` | none | `false`; refuse replacement |
 | `--max-download-bytes` | `OVERTURE_CLIENT_MAX_DOWNLOAD_BYTES` | `67108864` (64 MiB) |
 
-The client performs no automatic retries, catalog replacement, or H3
+The client performs no automatic retries, catalog replacement, or tile
 refinement. Exit codes are:
 
 | Code | Meaning |
@@ -172,13 +189,14 @@ refinement. Exit codes are:
 | `1` | Transport, integrity, filesystem, timeout, or unexpected server failure. |
 | `2` | Invalid CLI arguments or HTTP 400. |
 | `3` | Catalog changed (HTTP 409); refresh and invoke again with the current version. |
-| `4` | Tile too large (HTTP 422); request the suggested finer resolution. |
+| `4` | Tile too large (HTTP 422); request finer H3 cells or all four XYZ children at the suggested zoom. |
 | `5` | Temporary service failure (HTTP 503/504); retry later. |
 
 For a size rejection, cover the viewport or original cell with every finer
 cell intersecting its footprint and deduplicate POIs by ID; logical children
-alone do not guarantee coverage at boundaries. At resolution 15, refinement is
-unavailable, so omit the tile or use a deployment with different limits.
+alone do not guarantee coverage at boundaries. For a square rejection, request its four children at the next zoom. At H3
+resolution 15 or XYZ zoom 22, refinement is unavailable; omit the tile or use a
+deployment with different limits.
 
 ## Images, smoke tests, and native dependencies
 

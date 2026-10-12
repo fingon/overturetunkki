@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 type JobFunc func(context.Context, *Reservation) error
@@ -13,12 +14,14 @@ type JobFunc func(context.Context, *Reservation) error
 type SchedulerOptions struct {
 	Workers       int
 	QueueCapacity int
+	Timeout       time.Duration
 }
 
 type Scheduler struct {
-	cache *Cache
-	queue chan *job
-	wait  sync.WaitGroup
+	cache   *Cache
+	queue   chan *job
+	wait    sync.WaitGroup
+	timeout time.Duration
 
 	mu     sync.Mutex
 	closed bool
@@ -26,16 +29,17 @@ type Scheduler struct {
 }
 
 type job struct {
-	key      string
-	tileKey  Key
-	maxBytes int64
-	build    JobFunc
-	context  context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
-	waiters  int
-	started  bool
-	err      error
+	transient bool
+	key       string
+	tileKey   Key
+	maxBytes  int64
+	build     JobFunc
+	context   context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	waiters   int
+	started   bool
+	err       error
 }
 
 func NewScheduler(cache *Cache, options SchedulerOptions) (*Scheduler, error) {
@@ -48,10 +52,14 @@ func NewScheduler(cache *Cache, options SchedulerOptions) (*Scheduler, error) {
 	if options.QueueCapacity <= 0 {
 		return nil, fmt.Errorf("create cache scheduler: queue capacity must be positive, got %d", options.QueueCapacity)
 	}
+	if options.Timeout < 0 {
+		return nil, errors.New("scheduler timeout must not be negative")
+	}
 	scheduler := &Scheduler{
-		cache: cache,
-		queue: make(chan *job, options.QueueCapacity),
-		jobs:  make(map[string]*job),
+		timeout: options.Timeout,
+		cache:   cache,
+		queue:   make(chan *job, options.QueueCapacity),
+		jobs:    make(map[string]*job),
 	}
 	for range options.Workers {
 		scheduler.wait.Add(1)
@@ -61,6 +69,24 @@ func NewScheduler(cache *Cache, options SchedulerOptions) (*Scheduler, error) {
 }
 
 func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, build JobFunc) error {
+	return scheduler.do(ctx, key, build, jobOptions{maxBytes: maxBytes})
+}
+
+func (scheduler *Scheduler) DoTransient(ctx context.Context, key Key, build func(context.Context) error) error {
+	if build == nil {
+		return errors.New("run transient job: build function is nil")
+	}
+	return scheduler.do(ctx, key, func(ctx context.Context, _ *Reservation) error {
+		return build(ctx)
+	}, jobOptions{transient: true})
+}
+
+type jobOptions struct {
+	maxBytes  int64
+	transient bool
+}
+
+func (scheduler *Scheduler) do(ctx context.Context, key Key, build JobFunc, options jobOptions) error {
 	if scheduler == nil {
 		return errors.New("run cache job: scheduler is nil")
 	}
@@ -84,16 +110,17 @@ func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, bui
 	}
 	current := scheduler.jobs[keyDigest]
 	if current == nil {
-		jobContext, cancel := context.WithCancel(context.Background())
+		jobContext, cancel := scheduler.jobContext()
 		current = &job{
-			key:      keyDigest,
-			tileKey:  key,
-			maxBytes: maxBytes,
-			build:    build,
-			context:  jobContext,
-			cancel:   cancel,
-			done:     make(chan struct{}),
-			waiters:  1,
+			transient: options.transient,
+			key:       keyDigest,
+			tileKey:   key,
+			maxBytes:  options.maxBytes,
+			build:     build,
+			context:   jobContext,
+			cancel:    cancel,
+			done:      make(chan struct{}),
+			waiters:   1,
 		}
 		select {
 		case scheduler.queue <- current:
@@ -108,6 +135,13 @@ func (scheduler *Scheduler) Do(ctx context.Context, key Key, maxBytes int64, bui
 	}
 	scheduler.mu.Unlock()
 	return scheduler.waitForCaller(ctx, current)
+}
+
+func (scheduler *Scheduler) jobContext() (context.Context, context.CancelFunc) {
+	if scheduler.timeout > 0 {
+		return context.WithTimeout(context.Background(), scheduler.timeout)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func (scheduler *Scheduler) Close() error {
@@ -134,6 +168,11 @@ func (scheduler *Scheduler) waitForCaller(ctx context.Context, current *job) err
 	case <-current.done:
 		return current.err
 	case <-ctx.Done():
+		if current.transient {
+			current.cancel()
+			<-current.done
+			return errors.Join(fmt.Errorf("transient job canceled: %w", ctx.Err()), current.err)
+		}
 		scheduler.detach(current)
 		return fmt.Errorf("cache job caller detached: %w", ctx.Err())
 	}
@@ -166,7 +205,11 @@ func (scheduler *Scheduler) worker() {
 		current.started = true
 		scheduler.mu.Unlock()
 
-		reservation, err := scheduler.cache.Reserve(current.context, current.maxBytes)
+		var reservation *Reservation
+		err := current.context.Err()
+		if err == nil && !current.transient {
+			reservation, err = scheduler.cache.ReserveTile(current.context, current.tileKey, current.maxBytes)
+		}
 		if err == nil {
 			err = current.context.Err()
 			if err == nil {
@@ -188,7 +231,7 @@ func (scheduler *Scheduler) worker() {
 		close(current.done)
 		scheduler.mu.Unlock()
 		if abandoned && err != nil {
-			slog.Error("detached cache job failed", "cell", current.tileKey.Cell, "catalog_version", current.tileKey.CatalogVersion, "projection_id", current.tileKey.ProjectionID, "size_policy_id", current.tileKey.SizePolicyID, "error", err)
+			slog.Error("detached cache job failed", "tile", current.tileKey.Tile, "catalog_version", current.tileKey.CatalogVersion, "projection_id", current.tileKey.ProjectionID, "size_policy_id", current.tileKey.SizePolicyID, "error", err)
 		}
 	}
 }
