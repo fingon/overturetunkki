@@ -174,3 +174,6 @@ items below are completed;
   cleanup plus negative caching when retention cannot fit.
 - [x] Add native macOS amd64/arm64 extensions, full package checks, public API
   fixtures, in-process cancellation/recovery, and unchanged-host-limit tests.
+- [x] Use DuckDB installation during Go/native service open for missing extensions;
+  retain signature verification and offline reuse, and preserve explicit
+  directories and checksum-pinned ko bundled assets.

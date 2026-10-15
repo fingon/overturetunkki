@@ -42,8 +42,9 @@ type Options struct {
 	TileTimeout          time.Duration
 	NegativeCacheEntries int64
 	NegativeCacheTTL     time.Duration
-	ExtensionDirectory   string
-	Profile              bool
+	// ExtensionDirectory bypasses managed downloads when set to an absolute path.
+	ExtensionDirectory string
+	Profile            bool
 }
 
 // DefaultOptions returns independent options using the supplied absolute cache directory.
@@ -111,6 +112,7 @@ func (options Options) config() config.Config {
 type Service struct{ service *app.Service }
 
 // Open starts a service without a listener, signal handlers, or global logging changes.
+// Missing extensions are installed by DuckDB into the cache before Open returns.
 // Catalog discovery runs in the background; Catalog and Get wait for validated metadata.
 // Cancellation of ctx cancels requests and observation; callers must still call Close.
 func Open(ctx context.Context, options Options) (*Service, error) {

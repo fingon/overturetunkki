@@ -43,7 +43,7 @@ const (
 type Config struct {
 	AssetCAFile          string        `env:"OVERTURE_ASSET_CA_FILE" help:"Optional PEM CA bundle for HTTPS asset reads." name:"asset-ca-file"`
 	CatalogClient        *http.Client  `kong:"-"`
-	ExtensionDirectory   string        `env:"OVERTURE_DUCKDB_EXTENSION_DIRECTORY" help:"Directory containing pinned DuckDB extensions." name:"extension-directory"`
+	ExtensionDirectory   string        `env:"OVERTURE_DUCKDB_EXTENSION_DIRECTORY" help:"Directory containing DuckDB extensions; empty installs into the cache unless ko assets are available." name:"extension-directory"`
 	Listen               string        `default:":8080" env:"OVERTURE_LISTEN" help:"HTTP listen address." name:"listen"`
 	CatalogURL           string        `default:"https://stac.overturemaps.org/catalog.json" env:"OVERTURE_CATALOG_URL" help:"Trusted STAC catalog endpoint." name:"catalog-url"`
 	CatalogHost          string        `default:"stac.overturemaps.org" env:"OVERTURE_CATALOG_HOST" help:"Trusted STAC catalog host." name:"catalog-host"`

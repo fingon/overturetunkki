@@ -33,13 +33,12 @@ checksum-pinned DuckDB extensions and tests every package; `make build` builds
 all three binaries. `make build-client` and `make test-client` select just the
 client.
 
-A local service needs a writable absolute cache directory and the extensions:
+A local service needs a writable absolute cache directory. On first startup it
+uses DuckDB to install missing extensions:
 
 ```sh
-make fetch-extensions
 mkdir -p "$PWD/.cache/overture"
 OVERTURE_CACHE_DIR="$PWD/.cache/overture" \
-OVERTURE_DUCKDB_EXTENSION_DIRECTORY="$PWD/cmd/overturetunkki/kodata/extensions" \
   ./bin/overturetunkki
 ```
 
@@ -72,7 +71,8 @@ are preserved unless `--force` is supplied.
 
 Import `github.com/fingon/overturetunkki` to retrieve tiles directly as local
 files. DuckDB runs in-process; no listener, worker executable, or special main
-function is required. Supply the matching pinned extensions at deployment.
+function is required. `Open` uses DuckDB to install missing extensions and
+reuses installed files on later starts, including offline.
 
 ```go
 package main
@@ -88,7 +88,6 @@ import (
 
 func run(ctx context.Context) (err error) {
     options := overture.DefaultOptions("/absolute/path/to/cache")
-    options.ExtensionDirectory = "/absolute/path/to/extensions"
     service, err := overture.Open(ctx, options)
     if err != nil {
         return err
@@ -120,6 +119,16 @@ Options do not read environment variables or change global logging. An optional
 `CatalogClient` supplies a caller-owned STAC client; `AssetCAFile` supplies a
 custom PEM CA bundle for DuckDB asset reads.
 
+Extension preparation happens during `Open`, honors its context, and has a
+five-minute timeout. DuckDB installs signed `httpfs` and `spatial` extensions
+for its linked version and platform from `https://extensions.duckdb.org`.
+Installed extensions persist under `CacheDir/extensions`, outside tile-cache
+and scratch limits. Set `ExtensionDirectory` to an absolute directory to supply
+extensions yourself and bypass installation. Bundled container extensions still
+use the fetch script's exact checksum pins; automatic installations use DuckDB's
+signature verification instead. `CatalogClient` and `AssetCAFile` do not configure
+extension downloads.
+
 Tile paths are read-only and remain pinned until `tile.Close()` or
 `service.Close()`. Ordinary XYZ files stay in the bounded disk cache; ordinary
 H3 files are deleted after the final holder closes them. A service exclusively
@@ -132,7 +141,7 @@ The HTTP executable uses the same in-process tile engine as the Go API.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
-| `--extension-directory` | `OVERTURE_DUCKDB_EXTENSION_DIRECTORY` | DuckDB default; ko uses bundled assets |
+| `--extension-directory` | `OVERTURE_DUCKDB_EXTENSION_DIRECTORY` | Download into cache; ko uses bundled assets |
 | `--asset-ca-file` | `OVERTURE_ASSET_CA_FILE` | system trust |
 | `--listen` | `OVERTURE_LISTEN` | `:8080` |
 | `--catalog-url` | `OVERTURE_CATALOG_URL` | `https://stac.overturemaps.org/catalog.json` |

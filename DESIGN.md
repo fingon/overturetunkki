@@ -58,8 +58,22 @@ The module root exports `Options`, `DefaultOptions(cacheDir)`, and
 `Open(ctx, options)`. Opening validates options, locks the cache, and starts
 catalog observation without binding a socket or reading command configuration.
 Options must start from explicit defaults; zero values are validated rather
-than silently replaced. Extensions are loaded from `ExtensionDirectory` or
-DuckDB's normal local installation; automatic loading and downloads are disabled.
+than silently replaced. When `ExtensionDirectory` is empty, opening prepares
+`httpfs` and `spatial` under `CacheDir/extensions` after acquiring the exclusive
+cache lock. DuckDB's built-in `INSTALL` selects artifacts for the linked DuckDB
+version and platform from `https://extensions.duckdb.org` and reuses existing
+installations. Preparation explicitly loads both extensions before returning.
+Signature verification remains enabled. Automatic installations do not enforce
+the fetch script's exact SHA-256 pins; the script and bundled images retain them.
+A caller-supplied directory bypasses managed preparation; the HTTP executable
+continues selecting ko bundled assets when available. Query connections retain
+explicit loading with DuckDB's implicit installation and loading disabled.
+
+Preparation honors the opening context with a five-minute total timeout and
+emits structured installation logs. Errors return from opening and release the
+cache lock. Installed extensions persist across starts for offline reuse and
+are outside tile-cache and scratch accounting. Extension downloads use DuckDB's
+transport, independently of catalog and asset transports.
 An optional caller-owned `CatalogClient` customizes STAC transport; `AssetCAFile`
 selects a PEM trust bundle for DuckDB asset reads with verification enabled.
 
@@ -627,7 +641,7 @@ These defaults are starting points to validate with representative POIs.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--extension-directory` | local DuckDB installation | Pinned extension root; ko defaults to its bundled assets. |
+| `--extension-directory` | managed download into cache | Explicit extension root bypasses installation; ko defaults to bundled assets. |
 | `--asset-ca-file` | system trust | Optional PEM CA bundle for asset HTTPS. |
 | `--listen` | `:8080` | HTTP address. |
 | `--catalog-url` | `https://stac.overturemaps.org/catalog.json` | Trusted catalog endpoint. |
@@ -709,7 +723,7 @@ Do not assume macOS ko invocation can cross-compile this native dependency set.
 
 Package pinned `httpfs` and any required spatial extension artifacts into the
 image via ko data assets or the pinned base. Load from a known read-only path;
-do not install extensions from the network at runtime. Verify H3 UDF registration
+bundled containers bypass managed runtime downloads. Verify H3 UDF registration
 and GeoParquet output support against the pinned versions. Run as non-root with
 a read-only root filesystem and writable cache/scratch mounts. Public Overture
 S3 access requires no embedded AWS secrets. Restrict catalog asset URLs to the

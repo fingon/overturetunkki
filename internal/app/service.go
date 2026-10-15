@@ -64,6 +64,10 @@ func (lease *Lease) Close() error {
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Service, error) {
+	return open(ctx, cfg, prepareExtensions)
+}
+
+func open(ctx context.Context, cfg config.Config, prepare func(context.Context, string) (string, error)) (*Service, error) {
 	if ctx == nil {
 		return nil, errors.New("open service: context is nil")
 	}
@@ -96,6 +100,13 @@ func Open(ctx context.Context, cfg config.Config) (*Service, error) {
 	tileCache, err := cache.New(cache.Options{Root: cfg.CacheDir, MaxBytes: cfg.CacheMaxBytes, MaxEntries: cfg.CacheMaxEntries})
 	if err != nil {
 		return nil, fmt.Errorf("create tile cache: %w", err)
+	}
+	if cfg.ExtensionDirectory == "" {
+		directory, prepareErr := prepare(ctx, cfg.CacheDir)
+		if prepareErr != nil {
+			return nil, errors.Join(prepareErr, tileCache.Close())
+		}
+		cfg.ExtensionDirectory = directory
 	}
 	negative, err := cache.NewNegativeCache(negativeCacheEntries, cfg.NegativeCacheTTL)
 	if err != nil {
