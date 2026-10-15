@@ -10,7 +10,7 @@ command configuration, catalog validation, catalog observation, service wiring,
 the CLI testing client, and the opt-in container harness are implemented.
 Build a Go 1.27 HTTP service with ko. Query upstream Overture GeoParquet on S3
 using DuckDB, return POIs for XYZ squares or H3 cells, and retain successful
-squares in a bounded disk LRU. H3 results are temporary compositions of at most
+squares and completed oversized tiles in a bounded disk LRU. H3 results are temporary compositions of at most
 four squares. The initial dataset is `theme=places/type=place`; other
 themes, historical release serving, arbitrary SQL, and distributed cache
 coordination are out of scope. Remaining implementation work and feasibility
@@ -43,20 +43,47 @@ UID/GID 65532 with mode 0750, added as a deterministic layer after the ko build.
 It supports running without a cache mount on a writable root filesystem;
 the cache then lasts only as long as the container. Read-only root filesystems
 require a writable cache mount.
-The Go supervisor handles HTTP, catalog discovery, cache accounting, and work
-admission. A bounded scheduler launches one isolated worker process per admitted
-build from the same binary and embeds DuckDB through
-`github.com/duckdb/duckdb-go/v2`. Workers perform S3 reads and `COPY`; process
-isolation provides enforceable output limits and cancellation without
-interrupting unrelated queries. A dead worker affects only its build; the next
-admission starts a fresh process.
+The shared Go service handles catalog discovery, cache accounting, and work
+admission. A bounded scheduler runs each build in an independent in-process
+DuckDB database through `github.com/duckdb/duckdb-go/v2`, with one connection
+and a unique scratch directory. The HTTP executable owns its listener, signals,
+CLI configuration, and logging. There are no worker subprocesses or process-wide
+resource-limit changes. Native failures can affect the host; DuckDB memory
+settings are per database rather than a total process RSS limit. Cancellation
+uses query contexts and has no process-kill fallback.
 
-Use `net/http`, `log/slog`, and `github.com/alecthomas/kong`. Configuration is
-parsed directly into typed configuration structs with environment overrides.
-Use named constants for repeated values and explicit error propagation. Proposed
-packages are `catalog`, `tiles`, `cache`, `worker`, and `httpapi`, behind small
-interfaces so catalog, clock, query execution, and filesystem failures are
-controllable in tests.
+### Public Go API
+
+The module root exports `Options`, `DefaultOptions(cacheDir)`, and
+`Open(ctx, options)`. Opening validates options, locks the cache, and starts
+catalog observation without binding a socket or reading command configuration.
+Options must start from explicit defaults; zero values are validated rather
+than silently replaced. Extensions are loaded from `ExtensionDirectory` or
+DuckDB's normal local installation; automatic loading and downloads are disabled.
+An optional caller-owned `CatalogClient` customizes STAC transport; `AssetCAFile`
+selects a PEM trust bundle for DuckDB asset reads with verification enabled.
+
+`Service.Catalog(ctx)` returns release/version/projection identity, selected
+fields, serving limits, supported H3 resolutions/XYZ zooms, and attribution.
+`Service.Get(ctx, TileRequest)` selects exactly one canonical H3 `Cell` or XYZ
+`Square`. An omitted catalog version selects the current validated version;
+an explicit version must match. Requests validate coordinates and minimum H3
+resolution before upstream checks. Freshness and generation checks run before
+building and before publishing the result to its caller. Typed limit and
+catalog-change errors and public sentinels support `errors.As`/`errors.Is`.
+
+`Tile` supplies an absolute, read-only `Path`, actual `SizeBytes`, digest, and
+release/version/projection metadata. `Tile.Close` releases its pin; ordinary
+H3 files are removed after their final holder closes. `Service.Close` rejects
+new requests, cancels observation and builds, joins active work, releases all
+outstanding tile leases, and closes the exclusive cache. Both closes are
+idempotent. Context cancellation requires callers to still close the service.
+Public entrypoints expose no internal-package types. The HTTP API remains
+executable-owned.
+
+Use `net/http`, `log/slog`, and `github.com/alecthomas/kong`; parse command flags
+and environment overrides only in the HTTP executable. Keep catalog, cache,
+query execution, and HTTP transport boundaries testable independently.
 
 ## Catalog identity and freshness
 
@@ -384,21 +411,15 @@ asset's schema with `WHERE FALSE` and produce the same typed empty GeoParquet
 output, including nested fields. This path may read remote metadata but does
 not scan source rows.
 
-Supervisor logs include effective worker limits, manifest/selected asset counts,
-selected asset bytes (object sizes, not measured transfer), elapsed milliseconds,
-and worker planning/materialization/COPY/validation timings. Returned worker
-failures include their phase; process interruption before a protocol response
-is labeled `process`. Caller cancellation is logged at warning level and maps
-to the existing retryable `504 tile_timeout` response rather than an internal
-server error. Cancellation of the last caller discards a queued job. Once a
-worker dequeues a job, caller cancellation only detaches that caller: the job
-continues through validation and cache publication and remains available for
-later callers to join. Shutdown and the worker deadline still cancel running
-work. Detached-job failures and cleanup errors are logged with tile identity.
+Build logs report selected sources, elapsed time, executed scan profiles in
+verbose mode, and diagnostic stages. Running square jobs continue caching after
+their callers detach; abandoned queued jobs are canceled. Generation fencing,
+shutdown, and tile deadlines cancel running queries. Cleanup and detached-job
+failures are logged with tile identity.
 
 For admitted rows, use DuckDB `COPY (SELECT <projection> FROM candidate)` to a
 single staging file with `FORMAT PARQUET, COMPRESSION ZSTD`. Do not split output
-into parts. Row order is unspecified; the ETag hashes the actual file. Use
+into parts. Rows are sorted by ID; the ETag hashes the actual file. Use
 `internal/geoparquet` to project geometry to WKB `BLOB` data (the production
 query uses `ST_AsWKB`) and inject exactly one GeoParquet 1.1 `geo` metadata
 value. The pinned DuckDB native `GEOMETRY` export currently writes GeoParquet
@@ -411,41 +432,29 @@ nested fields. Deterministic files are committed under
 `testdata/geoparquet/`; plain Parquet containing WKB without metadata is
 insufficient.
 
-Set Linux `RLIMIT_FSIZE` in the isolated worker to `max_tile_bytes` before COPY.
-The `internal/worker` output guard applies that limit, catches `EFBIG`-style
-COPY errors, reports `ErrOutputTooLarge`, and removes partial output. The
-supervisor must also remove the staging path when the worker terminates from
-`SIGXFSZ`; the limit bounds regular-file output even when DuckDB buffers row
-groups or grows the footer. `DisableCopySpill` sets both `temp_directory = ''`
-and `max_temp_directory_size = '0B'` for the COPY phase, so the file-size limit
-cannot be confused with a spill-file limit. Other write failures remain storage
-errors, not size errors.
+The primary early guard is `max_tile_rows + 1`. Reject before COPY if that
+extra row exists; the probe is not a complete tile and is never retained.
+COPY produces one complete file without modifying the host's resource limits.
+COPY spill is disabled, while candidate materialization uses the build's own
+memory/thread/spill settings. The completed file is independently validated for
+GeoParquet metadata, footer, schema, row count, and SHA-256 digest.
 
-`internal/worker/output_test.go` proves this contract in subprocesses using the
-pinned DuckDB build: a buffered 250,000-row Parquet COPY succeeds at its exact
-measured size and fails one byte below it; a 2 MiB high-entropy individual row
-fails under a 64 KiB limit; partial files are never accepted; and an ordered,
-low-memory COPY fails when spilling is disabled. The parent accepts either a
-returned file-size error or a worker exit signaled by `SIGXFSZ`, and always
-cleans the staging path. The same package verifies that candidate materializing
-queries use `LIMIT max_tile_rows + 1`, including zero and overflow limits.
+`max_tile_bytes` is a serving threshold, checked against actual completed file
+size, including the footer; equality is allowed. It is not a hard write limit.
+Retain complete oversized tiles in the bounded disk cache if actual-size
+admission succeeds; return a size error instead of a path or HTTP payload.
+If the file cannot fit, remove it and remember its size rejection. Invalid or
+partial output is always removed. The cache never publishes unvalidated files.
+Temporary output can exceed estimated reservations; filesystem quotas are the
+physical disk bound. DuckDB memory limits, row limits, deadlines, and bounded
+concurrency remain in effect but do not promise constant-time rejection or
+bounded S3 transfer.
 
-After COPY, validate the footer, GeoParquet metadata, actual file size, and
-expected schema before publication. `RuntimeSettings` applies DuckDB memory,
-thread, scratch, and tile-deadline settings; `BuildTileWithSettings` validates
-the independent footer/schema reader, size, and SHA-256 digest before returning
-a result. Include footer bytes in the limit and allow exact equality. No tile
-bytes are sent to HTTP clients until validation succeeds.
-DuckDB's [COPY options](https://duckdb.org/docs/lts/sql/statements/copy) support
-zstd, but `FILE_SIZE_BYTES` is a file-splitting target, not a hard single-file
-size guard. Do not use it for this contract.
-
-Exact zstd size cannot be known before encoding. Fast failure means an early
-row-limit probe and interruption as soon as output would exceed the byte limit;
-it cannot promise a constant-time decision or a bound on S3 bytes fetched.
-Deadlines, DuckDB memory limits, and bounded concurrency also apply. If the
-worker hard-limit prototype fails, resolve it before implementing serving; do
-not replace it with an unbounded COPY followed only by stat.
+Output tests exercise exact-size equality, below-size rejection, high-entropy
+single rows, cancellation/recovery, and unchanged host file-size limits directly
+in-process. Service tests verify oversized-file retention and non-serving,
+cache-capacity failures, subsequent rejection without rebuilding, and internal
+reuse of retained oversized sources.
 
 Deterministic worker benchmarks cover dense-city and sparse-region query
 planning without contacting S3. Bbox correctness tests read Parquet fixtures
@@ -484,8 +493,8 @@ accepts only constructed row/byte size proofs, bounds them with an LRU and TTL,
 and supports catalog-version invalidation; transient failures have no insertion
 path.
 
-Cache key: `(catalog_version, projection_id, XYZ identity, size_policy_id)`.
-The persisted identity field is `tile`, with a canonical `xyz/z/x/y` value.
+Cache key: `(catalog_version, projection_id, query identity, size_policy_id)`.
+The persisted identity field is `tile`, with a canonical `xyz/z/x/y` value or canonical H3 index for a retained oversized H3 file.
 Old sidecars using `cell` fail reconciliation and are removed with their files.
 The size policy hashes byte/row limits, the minimum resolution, and selected
 fields and an XYZ cache revision, preventing reuse across different admission
@@ -502,7 +511,9 @@ Log corrupt entries and remove them; unexpected filesystem errors fail visibly.
 `cache_max_bytes` bounds the sum of complete tile file lengths, including old
 generations and pinned files. Before a build, reserve `max_tile_bytes` in that
 budget and evict least recently used unpinned entries until the reservation fits.
-Replace the reservation with actual size on atomic publication. Evict obsolete
+Replace the reservation with actual size on atomic publication, admitting growth
+under the cache mutex and evicting unpinned entries as needed. Reject files larger
+than the entire budget without evicting existing entries. Evict obsolete
 generations first. Open response files are pinned until transmission completes;
 unlinked-but-open storage must remain accounted until the final reader closes.
 If pinned files prevent admission, return `503 capacity_unavailable`.
@@ -517,8 +528,8 @@ Bound scratch/spill separately with `scratch_max_bytes`, per-worker allocations,
 and a filesystem quota or size-limited volume. Provision disk for cache,
 scratch, filesystem overhead, and metadata; logical file lengths are not physical
 block usage. Bound metadata by `cache_max_entries`; reserve entry slots before
-work as well. Staging consumes the byte reservation, not an untracked second
-cache. Delete/cancellation failures retain accounting and are logged/retried.
+work as well. Staging reserves the expected output allowance; actual COPY output may exceed
+that estimate before validation and cache admission. Delete/cancellation failures retain accounting and are logged/retried.
 
 Coalesce simultaneous requests for the same key into one build. Bound workers
 and the waiting queue; return `503` when full. Caller cancellation detaches that
@@ -529,7 +540,7 @@ on catalog fencing/expiry, shutdown, or worker deadline. HTTP admission counts d
 for an already admitted tile share its slot until their final handler finishes.
 Each scheduled build rechecks positive and negative caches before starting
 expensive work, preventing a stale miss from launching a duplicate build. Cancel
-SQL then terminate an unresponsive isolated worker. Release
+SQL through its context. Release
 reservations only after cleanup. Bound slow-client write time so pinned files
 cannot consume capacity indefinitely.
 
@@ -559,7 +570,8 @@ cover contains no more than four distinct squares. Fetch those squares
 sequentially through the normal square path and stop at the first failure.
 Each H3 build performs at most four square fetches, counting cache hits; it
 never substitutes children, retries another covering zoom, or queries upstream
-H3 data directly. A source row/byte rejection returns HTTP 422 for the original
+H3 data directly. Completed oversized square files are valid internal sources.
+A source row rejection, or a byte rejection without retained output, returns HTTP 422 for the original
 H3 cell with existing refinement guidance and the offending square in the
 message. Wholly polar cells return valid empty GeoParquet; empty output uses
 a schema-only Parquet query against one validated source asset, without
@@ -567,7 +579,7 @@ scanning POI rows; STAC column types may be incomplete.
 
 Pin completed source files while the worker applies exact H3 membership and
 deduplicates POI IDs before final row/byte checks. Sort exported rows by ID for
-stable repeated ETags. Pass absolute local `source_paths` in the worker protocol;
+stable repeated ETags. Pass absolute local source paths to the in-process build;
 H3 compositions use at most four files. Square requests without local sources
 retain upstream selection. Geometry, projection, COPY, metadata, and validation
 contracts apply to both styles.
@@ -575,7 +587,7 @@ contracts apply to both styles.
 H3 orchestration runs outside worker slots. Square builds and final H3 assembly
 share one bounded worker queue, including when worker-count is one. Coalesce
 H3 callers through a reference-counted temporary result; do not publish H3
-files or sidecars. Cancel H3 work when its last caller leaves, on generation
+ordinary files or sidecars; completed oversized H3 files may be published. Cancel H3 work when its last caller leaves, on generation
 fencing, shutdown, or its overall deadline. Temporary files remain in staging
 until the final reader closes, then are deleted.
 
@@ -606,18 +618,17 @@ pre-commit hooks run it with the shared configuration for formatting and linting
 The runtime image and DuckDB extension archives are pinned by digest/checksum;
 the probe never installs extensions or downloads them at runtime.
 
-`cmd/overturetunkki` now provides the supervisor and worker process modes. The
-supervisor mode is the default and owns the catalog observer, HTTP server, disk
-cache, bounded scheduler, and isolated workers. A worker process receives one
-bounded JSON request over standard input, writes its complete tile into the
-supervisor's staging volume, and returns typed failure metadata over standard
-output. All flags have `OVERTURE_`-prefixed environment equivalents, and `-v`
-sets the default `slog` level to debug.
+`cmd/overturetunkki` starts the shared in-process service and its HTTP adapter.
+All flags have `OVERTURE_` environment equivalents, and `-v` configures global
+`slog` debug logging and query profiling. The Go API configures neither global
+logging nor environment-derived defaults.
 
 These defaults are starting points to validate with representative POIs.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--extension-directory` | local DuckDB installation | Pinned extension root; ko defaults to its bundled assets. |
+| `--asset-ca-file` | system trust | Optional PEM CA bundle for asset HTTPS. |
 | `--listen` | `:8080` | HTTP address. |
 | `--catalog-url` | `https://stac.overturemaps.org/catalog.json` | Trusted catalog endpoint. |
 | `--catalog-host` | `stac.overturemaps.org` | Exact trusted catalog host, including an optional test port. |
@@ -647,7 +658,7 @@ Reject nonpositive limits, unsupported fields, an unwritable cache, and
 `cache_max_bytes < max_tile_bytes`. Require `id` and `geometry`, reject duplicate
 or unknown fields, and reject malformed listen or catalog URLs. Validate
 concurrency against deployment memory and scratch allocations; require
-`scratch_max_bytes / worker_count > max_tile_bytes` so output and spill fit; DuckDB memory
+`scratch_max_bytes / worker_count > max_tile_bytes` to budget expected output and spill; temporary output may exceed the estimate; DuckDB memory
 limits do not bound total process RSS. Use container memory/CPU limits in
 addition. Log failures with structured request ID, catalog version, H3 cell,
 duration, and error metadata, without credentials. Metrics cover catalog
@@ -663,10 +674,10 @@ target. `build-linux` uses the pinned Go
 container toolchain under Podman for Linux CGO artifacts. ko is a Go tool in
 `build/tools/go.mod`, isolated from application dependencies; Podman runs it
 in Linux and loads its image tarballs. No Docker daemon is required.
-Linux `make test` fetches checksum-pinned extensions and supplies their directory
-to the real spatial derivation tests. On macOS, build/test/vet select the CGO H3
-client; the service remains Linux-only.
-GitHub Actions tests amd64 and arm64 on Linux and gates
+Linux and macOS `make test` fetch checksum-pinned platform extensions and run
+all packages, including real spatial derivation and public API tests. Native
+build/test cover the service, library, and client. GitHub Actions tests
+amd64 and arm64 on Linux and macOS and gates
 Linux images with smoke and lifecycle tests. CI caches host Go modules and
 build results using both module checksum files, prek hook environments, and
 golangci-lint results. Podman builds use a cached host directory mounted at
@@ -684,7 +695,7 @@ extensions with the HTTP service. `container-test` is opt-in and runs a local
 TLS STAC/asset fixture against the service image, first verifying readiness and
 tile generation with the default cache and no cache mount, then with a read-only root,
 writable bounded cache volume, concurrent requests, conditional responses,
-release rollover, catalog and asset outages, worker replacement, and restart.
+release rollover, catalog and asset outages, failed-build recovery, and restart.
 The pre-commit hook is installed with `make hooks`.
 
 Pin Go 1.27, ko, the DuckDB Go driver/core, H3, extensions, and runtime image.
@@ -718,7 +729,7 @@ service-image changes without requiring live S3.
 
 Required acceptance cases include release rollover during a hit/build/stream,
 failed upstream checks, schema incompatibility without stale fallback, exact
-byte-limit boundaries including footer, huge single rows, worker limit signals,
+byte-limit boundaries including footer, huge single rows, retained oversized tiles, unchanged host limits,
 H3 boundaries/pentagons/poles/dateline, empty GeoParquet, selected nested columns,
 negative invalidation, coalescing/cancellation, LRU pinning, disk exhaustion,
 restart/crash recovery, and a ko image querying S3 without runtime extension

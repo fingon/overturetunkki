@@ -19,18 +19,16 @@ items below are completed;
 - [x] Prove the DuckDB H3 scalar UDF integration and performance. Implement and
   compare conservative bbox pruning against unpruned exact membership at cell
   boundaries, pentagons, poles, and the antimeridian.
-- [x] Prove isolated-worker RLIMIT_FSIZE behavior for DuckDB COPY, including
-  buffered output, footer growth, huge individual rows, exact-limit success,
-  SIGXFSZ handling, and cleanup. Verify bounded candidate materialization and
-  disabling COPY-phase spill. No serving implementation ships without a hard
-  output-size guard; resolve native integration failures explicitly.
+- [x] Enforce bounded candidate rows before COPY, validate completed output and
+  serving byte limits afterward, retain complete oversized files within cache
+  quotas, and verify no host resource limits are changed.
 - [x] Confirm pinned DuckDB can write GeoParquet 1.1-compatible WKB with zstd,
   correct CRS/geo metadata, nested selected fields, and empty results. Validate
   with an independent reader and store fixture files under testdata/.
 
 ## 2. Establish project and container build
 
-- [x] Add the Go module, supervisor/worker command modes, typed kong config with
+- [x] Add the Go module, in-process HTTP executable, typed kong config with
   documented defaults and environment overrides, validation, and slog `-v`.
 - [x] Add Makefile lint/test/build/image/smoke targets and a pinned prek
   configuration; enable hooks. Use gotest.tools/v3 and table-driven tests.
@@ -104,7 +102,7 @@ items below are completed;
   backpressure/Retry-After, slow-reader deadlines, and graceful shutdown.
 - [x] Exercise the complete container with writable volume limits and read-only
   root, an independent GeoParquet reader, concurrent clients, release rollover,
-  upstream outage, worker death, and restart. Keep live S3 tests opt-in.
+  upstream outage, failed-build recovery, and restart. Keep live S3 tests opt-in.
 
 ## 7. Go CLI testing client
 
@@ -139,7 +137,7 @@ items below are completed;
 - [x] Keep code, tests, DESIGN.md, README.md, and this backlog synchronized.
   Run Makefile lint/test/build and relevant image checks before completion.
 
-- [x] Support native macOS clients, Linux Podman builds with ko as a Go tool,
+- [x] Support native macOS service/library/clients, Linux Podman builds with ko as a Go tool,
   and GitHub Actions host and container checks for amd64 and arm64.
 
 - [x] Validate live tile performance for Helsinki cell `8a1126d33027fff` after
@@ -164,3 +162,15 @@ items below are completed;
   and bounded temporary storage. Reject oversized sources immediately without
   recursive subdivision or alternate-cover retries. Omit polar POIs outside
   the Web Mercator latitude range and return valid empty polar responses.
+
+## 9. Embedded Go API
+
+- [x] Expose typed options, catalog discovery, direct H3/XYZ tile retrieval with
+  pinned paths, typed errors, and deterministic service/tile cleanup.
+- [x] Share the in-process engine with the HTTP executable; remove worker
+  subprocess modes, JSON protocol, and process-wide file-size guards.
+- [x] Keep complete oversized XYZ/H3 files within cache limits without serving
+  them; allow internal source reuse, atomic admission of actual sizes, and
+  cleanup plus negative caching when retention cannot fit.
+- [x] Add native macOS amd64/arm64 extensions, full package checks, public API
+  fixtures, in-process cancellation/recovery, and unchanged-host-limit tests.

@@ -37,15 +37,13 @@ test-tools:
 test-linux: fetch-extensions
 	OVERTURE_DUCKDB_EXTENSION_DIRECTORY=$(abspath cmd/overturetunkki/kodata/extensions) $(GO) test ./...
 
-test-darwin: test-client
+test-darwin: fetch-extensions
+	OVERTURE_DUCKDB_EXTENSION_DIRECTORY=$(abspath cmd/overturetunkki/kodata/extensions) $(GO) test ./...
 
 test-client:
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) test ./cmd/overture-client ./internal/client ./internal/logging
 
-build: build-client
-ifeq ($(HOST_OS),linux)
-build: build-native
-endif
+build: build-client build-native
 
 build-client:
 	mkdir -p $(BIN_DIR)
@@ -60,7 +58,7 @@ build-linux:
 	$(LINUX_RUN) make build BIN_DIR=$(BIN_DIR)/linux-$(TARGET_ARCH)
 
 fetch-extensions:
-	./scripts/fetch-duckdb-extensions $(TARGET_ARCH)
+	./scripts/fetch-duckdb-extensions $(TARGET_ARCH) $(HOST_OS)
 
 image:
 	$(LINUX_RUN) make image-linux BIN_DIR=$(BIN_DIR) TARGET_ARCH=$(TARGET_ARCH) IMAGE_REPO=$(IMAGE_REPO) IMAGE_TAG=$(IMAGE_TAG)
@@ -93,11 +91,3 @@ hooks:
 
 clean:
 	rm -rf $(BIN_DIR)
-
-.PHONY: vet
-vet:
-ifeq ($(HOST_OS),linux)
-	$(GO) vet ./...
-else
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) vet ./cmd/overture-client ./internal/client ./internal/logging
-endif

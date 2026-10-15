@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,17 +20,6 @@ import (
 	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
-
-func TestMain(tests *testing.M) {
-	if os.Getenv(workerProtocolEnv) == workerProtocolValue {
-		if err := runWorkerProtocol(context.Background()); err != nil {
-			slog.Error("test worker protocol failed", "error", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-	os.Exit(tests.Run())
-}
 
 func newTestTileProvider(t *testing.T) *tileProvider {
 	t.Helper()
@@ -64,6 +52,7 @@ func TestH3StopsAtOversizedSourceWithoutRecursion(t *testing.T) {
 	for _, limit := range []cache.RejectionLimit{cache.RejectionLimitRows, cache.RejectionLimitBytes} {
 		t.Run(string(limit), func(t *testing.T) {
 			provider := newTestTileProvider(t)
+			provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 			generation, query := testH3Generation(t)
 			cover, err := h3SquareCover(query)
 			assert.NilError(t, err)
@@ -90,6 +79,7 @@ func TestH3StopsAtOversizedSourceWithoutRecursion(t *testing.T) {
 
 func TestH3UsesItsOwnProvenSizeRejection(t *testing.T) {
 	provider := newTestTileProvider(t)
+	provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 	generation, query := testH3Generation(t)
 	key := cache.Key{CatalogVersion: generation.Snapshot.CatalogVersion, ProjectionID: generation.Snapshot.ProjectionID, Tile: query.Cell, SizePolicyID: provider.policyID}
 	assert.NilError(t, provider.rememberSizeRejection(key, &worker.TooManyRowsError{ActualRows: provider.maxRows + 1, LimitRows: provider.maxRows}))
@@ -104,6 +94,7 @@ func TestH3TemporaryResultSharingAndCleanup(t *testing.T) {
 		t.Skip("requires bundled DuckDB extensions")
 	}
 	provider := newTestTileProvider(t)
+	provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 	generation, query := testH3Generation(t)
 	cover, err := h3SquareCover(query)
 	assert.NilError(t, err)
@@ -154,6 +145,7 @@ func TestH3TemporaryResultSharingAndCleanup(t *testing.T) {
 
 func TestH3CallerCancellationRemovesFlight(t *testing.T) {
 	provider := newTestTileProvider(t)
+	provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 	generation, query := testH3Generation(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -181,6 +173,7 @@ func TestH3CoverForPolarAndBoundaryCells(t *testing.T) {
 
 func TestTemporaryReaderCloseIsIdempotent(t *testing.T) {
 	provider := newTestTileProvider(t)
+	provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 	key := cache.Key{CatalogVersion: "catalog", ProjectionID: "projection", Tile: "temporary", SizePolicyID: provider.policyID}
 	file, err := provider.cache.CreateStaging(key)
 	assert.NilError(t, err)

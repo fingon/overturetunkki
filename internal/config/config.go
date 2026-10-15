@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,12 +16,7 @@ import (
 	"github.com/uber/h3-go/v4"
 )
 
-type Mode string
-
 const (
-	ModeSupervisor Mode = "supervisor"
-	ModeWorker     Mode = "worker"
-
 	DefaultListen                     = ":8080"
 	DefaultCatalogURL                 = "https://stac.overturemaps.org/catalog.json"
 	DefaultCatalogPollInterval        = 24 * time.Hour
@@ -45,7 +41,9 @@ const (
 )
 
 type Config struct {
-	Mode                 Mode          `default:"supervisor" enum:"supervisor,worker" env:"OVERTURE_MODE" help:"Process mode." name:"mode"`
+	AssetCAFile          string        `env:"OVERTURE_ASSET_CA_FILE" help:"Optional PEM CA bundle for HTTPS asset reads." name:"asset-ca-file"`
+	CatalogClient        *http.Client  `kong:"-"`
+	ExtensionDirectory   string        `env:"OVERTURE_DUCKDB_EXTENSION_DIRECTORY" help:"Directory containing pinned DuckDB extensions." name:"extension-directory"`
 	Listen               string        `default:":8080" env:"OVERTURE_LISTEN" help:"HTTP listen address." name:"listen"`
 	CatalogURL           string        `default:"https://stac.overturemaps.org/catalog.json" env:"OVERTURE_CATALOG_URL" help:"Trusted STAC catalog endpoint." name:"catalog-url"`
 	CatalogHost          string        `default:"stac.overturemaps.org" env:"OVERTURE_CATALOG_HOST" help:"Trusted STAC catalog host." name:"catalog-host"`
@@ -113,9 +111,13 @@ func Parse(args []string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Mode != ModeSupervisor && c.Mode != ModeWorker {
-		return fmt.Errorf("mode %q is not supported", c.Mode)
+	if c.AssetCAFile != "" && !filepath.IsAbs(c.AssetCAFile) {
+		return errors.New("asset-ca-file must be absolute")
 	}
+	if c.ExtensionDirectory != "" && !filepath.IsAbs(c.ExtensionDirectory) {
+		return errors.New("extension-directory must be absolute")
+	}
+
 	if c.MinTileResolution < 0 || c.MinTileResolution > h3.MaxResolution {
 		return fmt.Errorf("min-tile-resolution must be between 0 and %d, got %d", h3.MaxResolution, c.MinTileResolution)
 	}

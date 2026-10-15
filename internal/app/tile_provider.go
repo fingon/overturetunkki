@@ -1,23 +1,18 @@
-//nolint:tagliatelle // Worker protocol fields use the documented snake_case schema.
 package app
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	// Register DuckDB's database/sql driver.
@@ -32,30 +27,25 @@ import (
 )
 
 const (
-	duckdbHTTPFSExtension             = "httpfs"
-	duckdbSpatialExtension            = "spatial"
-	duckdbExtensionDirectoryEnv       = "OVERTURE_DUCKDB_EXTENSION_DIRECTORY"
-	duckdbDataPathEnv                 = "KO_DATA_PATH"
-	workerProtocolEnv                 = "OVERTURE_WORKER_PROTOCOL"
-	workerProtocolValue               = "tile-v2"
-	workerProtocolMaxBytes      int64 = 1 << 20
+	duckdbHTTPFSExtension       = "httpfs"
+	duckdbSpatialExtension      = "spatial"
+	duckdbExtensionDirectoryEnv = "OVERTURE_DUCKDB_EXTENSION_DIRECTORY"
+	duckdbDataPathEnv           = "KO_DATA_PATH"
 )
 
-var errWorkerProtocolResponseTooLarge = errors.New("isolated worker response exceeds protocol limit")
-
 type tileProvider struct {
-	cache         *cache.Cache
-	negative      *cache.NegativeCache
-	scheduler     *cache.Scheduler
-	scratch       *cache.ScratchPool
-	executable    string
-	cacheDir      string
-	fields        []string
-	maxRows       int64
-	maxBytes      int64
-	minResolution int
-	settings      worker.RuntimeSettings
-	policyID      string
+	cache              *cache.Cache
+	negative           *cache.NegativeCache
+	scheduler          *cache.Scheduler
+	scratch            *cache.ScratchPool
+	extensionDirectory string
+	assetCAFile        string
+	fields             []string
+	maxRows            int64
+	maxBytes           int64
+	minResolution      int
+	settings           worker.RuntimeSettings
+	policyID           string
 
 	mu                 sync.Mutex
 	lastCatalogVersion string
@@ -88,13 +78,6 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 	if perWorkerScratchBytes <= cfg.MaxTileBytes {
 		return nil, errors.New("create tile provider: per-worker scratch capacity must exceed max-tile-bytes")
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("locate tile worker executable: %w", err)
-	}
-	if !filepath.IsAbs(executable) {
-		return nil, fmt.Errorf("tile worker executable is not absolute: %q", executable)
-	}
 	scheduler, err := cache.NewScheduler(tileCache, cache.SchedulerOptions{Workers: workerCount, QueueCapacity: queueCapacity, Timeout: cfg.TileTimeout})
 	if err != nil {
 		return nil, err
@@ -109,23 +92,27 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 		TileTimeout:      cfg.TileTimeout,
 	}
 	provider := &tileProvider{
-		cache:         tileCache,
-		negative:      negative,
-		scheduler:     scheduler,
-		scratch:       scratch,
-		executable:    executable,
-		cacheDir:      cfg.CacheDir,
-		fields:        append([]string(nil), cfg.Fields...),
-		maxRows:       cfg.MaxTileRows,
-		maxBytes:      cfg.MaxTileBytes,
-		minResolution: cfg.MinTileResolution,
-		settings:      settings,
-		policyID:      sizePolicyID(cfg),
+		cache:              tileCache,
+		negative:           negative,
+		scheduler:          scheduler,
+		scratch:            scratch,
+		extensionDirectory: cfg.ExtensionDirectory,
+		assetCAFile:        cfg.AssetCAFile,
+		fields:             append([]string(nil), cfg.Fields...),
+		maxRows:            cfg.MaxTileRows,
+		maxBytes:           cfg.MaxTileBytes,
+		minResolution:      cfg.MinTileResolution,
+		settings:           settings,
+		policyID:           sizePolicyID(cfg),
 	}
 	return provider, nil
 }
 
 func (provider *tileProvider) Get(ctx context.Context, generation catalog.Generation, query tilequery.Query) (httpapi.Tile, error) {
+	return provider.get(ctx, generation, query, false)
+}
+
+func (provider *tileProvider) get(ctx context.Context, generation catalog.Generation, query tilequery.Query, source bool) (httpapi.Tile, error) {
 	if provider == nil {
 		return httpapi.Tile{}, errors.New("get tile: provider is nil")
 	}
@@ -171,6 +158,14 @@ func (provider *tileProvider) Get(ctx context.Context, generation catalog.Genera
 	if closed {
 		return httpapi.Tile{}, cache.ErrSchedulerClosed
 	}
+	if tile, err := provider.openCachedTile(key); err == nil {
+		if source {
+			return tile, nil
+		}
+		return provider.checkTileSize(tile)
+	} else if !errors.Is(err, cache.ErrEntryNotFound) {
+		return httpapi.Tile{}, err
+	}
 	if rejection, ok, err := provider.negative.Get(key); err != nil {
 		return httpapi.Tile{}, fmt.Errorf("check tile negative cache: %w", err)
 	} else if ok {
@@ -178,11 +173,6 @@ func (provider *tileProvider) Get(ctx context.Context, generation catalog.Genera
 	}
 	if query.Square == nil {
 		return provider.getH3(ctx, generation, key)
-	}
-	if tile, err := provider.openCachedTile(key); err == nil {
-		return tile, nil
-	} else if !errors.Is(err, cache.ErrEntryNotFound) {
-		return httpapi.Tile{}, err
 	}
 	if err := provider.scheduler.Do(ctx, key, provider.maxBytes, func(buildContext context.Context, reservation *cache.Reservation) error {
 		generationBuildContext, cancel := context.WithCancel(buildContext)
@@ -194,9 +184,30 @@ func (provider *tileProvider) Get(ctx context.Context, generation catalog.Genera
 		}
 		return provider.build(generationBuildContext, reservation, key, tileBuildOptions{Snapshot: snapshot, Query: query})
 	}); err != nil {
+		if source && errors.Is(err, worker.ErrOutputTooLarge) {
+			if tile, cacheErr := provider.openCachedTile(key); cacheErr == nil {
+				return tile, nil
+			} else if !errors.Is(cacheErr, cache.ErrEntryNotFound) {
+				return httpapi.Tile{}, errors.Join(err, cacheErr)
+			}
+		}
 		return httpapi.Tile{}, err
 	}
-	return provider.openCachedTile(key)
+	tile, err := provider.openCachedTile(key)
+	if err != nil {
+		return httpapi.Tile{}, err
+	}
+	if source {
+		return tile, nil
+	}
+	return provider.checkTileSize(tile)
+}
+
+func (provider *tileProvider) checkTileSize(tile httpapi.Tile) (httpapi.Tile, error) {
+	if tile.SizeBytes <= provider.maxBytes {
+		return tile, nil
+	}
+	return httpapi.Tile{}, errors.Join(&worker.OutputTooLargeError{ActualBytes: tile.SizeBytes, LimitBytes: provider.maxBytes}, tile.Reader.Close())
 }
 
 func (provider *tileProvider) openCachedTile(key cache.Key) (httpapi.Tile, error) {
@@ -286,7 +297,7 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 		sourceKind = "cache"
 	}
 	slog.Debug("tile build sources selected", "cell", key.Tile, "catalog_version", key.CatalogVersion, "source_kind", sourceKind, "source_count", len(sources.paths), "source_bytes", sources.sizeBytes)
-	result, workerErr := provider.runWorker(ctx, plan, stagingPath, options)
+	result, workerErr := provider.executeTile(ctx, plan, stagingPath, options)
 	err = errors.Join(workerErr, sources.Close())
 	if err != nil {
 		if rejectionErr := provider.rememberSizeRejection(key, err); rejectionErr != nil {
@@ -298,9 +309,20 @@ func (provider *tileProvider) build(ctx context.Context, reservation *cache.Rese
 		return errors.New("build tile returned invalid result")
 	}
 	if _, err := reservation.Publish(key, stagingPath, options.Snapshot.CatalogVersion); err != nil {
+		if result.SizeBytes > provider.maxBytes {
+			sizeErr := &worker.OutputTooLargeError{ActualBytes: result.SizeBytes, LimitBytes: provider.maxBytes}
+			if errors.Is(err, cache.ErrCapacityUnavailable) {
+				slog.Debug("oversized tile not retained", "tile", key.Tile, "size_bytes", result.SizeBytes, "error", err)
+				return errors.Join(sizeErr, provider.rememberSizeRejection(key, sizeErr))
+			}
+			return errors.Join(sizeErr, fmt.Errorf("publish tile: %w", err))
+		}
 		return fmt.Errorf("publish tile: %w", err)
 	}
 	published = true
+	if result.SizeBytes > provider.maxBytes {
+		return &worker.OutputTooLargeError{ActualBytes: result.SizeBytes, LimitBytes: provider.maxBytes}
+	}
 	return nil
 }
 
@@ -378,274 +400,48 @@ func (provider *tileProvider) Close() error {
 	return provider.closeErr
 }
 
-func (provider *tileProvider) runWorker(ctx context.Context, plan worker.QueryPlan, outputPath string, options tileBuildOptions) (worker.TileResult, error) {
-	request := tileWorkerRequest{
-		Cell:        plan.CellText,
-		Square:      plan.Square,
-		Fields:      append([]string(nil), provider.fields...),
-		Snapshot:    options.Snapshot,
-		SourcePaths: options.SourcePaths,
-		MaxRows:     provider.maxRows,
-		OutputPath:  outputPath,
-		Settings:    provider.settings,
+func (provider *tileProvider) executeTile(ctx context.Context, plan worker.QueryPlan, outputPath string, options tileBuildOptions) (worker.TileResult, error) {
+	request := tileExecutionRequest{
+		Cell:               plan.CellText,
+		Square:             plan.Square,
+		Fields:             append([]string(nil), provider.fields...),
+		Snapshot:           options.Snapshot,
+		SourcePaths:        options.SourcePaths,
+		MaxRows:            provider.maxRows,
+		OutputPath:         outputPath,
+		Settings:           provider.settings,
+		ExtensionDirectory: provider.extensionDirectory,
+		AssetCAFile:        provider.assetCAFile,
 	}
-	return runIsolatedTileWorker(ctx, provider.executable, provider.cacheDir, request)
+	started := time.Now()
+	diagnostics := worker.TileDiagnostics{Stage: "initialize"}
+	slog.Debug("tile build started", "tile", options.Query.String(), "release", options.Snapshot.Release)
+	result, err := executeTileRequest(ctx, request, &diagnostics)
+	slog.Debug("tile build finished", "tile", options.Query.String(), "elapsed_ms", time.Since(started).Milliseconds(), "stage", diagnostics.Stage, "error", err)
+	if diagnostics.MaterializeProfile != "" {
+		slog.Debug("tile scan profile", "tile", options.Query.String(), "profile", diagnostics.MaterializeProfile)
+	}
+	return result, err
 }
 
-type tileWorkerRequest struct {
-	Square      *tilequery.Square      `json:"square,omitempty"`
-	Cell        string                 `json:"cell"`
-	Fields      []string               `json:"fields"`
-	Snapshot    catalog.Snapshot       `json:"snapshot"`
-	MaxRows     int64                  `json:"max_rows"`
-	OutputPath  string                 `json:"output_path"`
-	Settings    worker.RuntimeSettings `json:"settings"`
-	SourcePaths []string               `json:"source_paths,omitempty"`
+type tileExecutionRequest struct {
+	AssetCAFile        string
+	ExtensionDirectory string
+	Square             *tilequery.Square
+	Cell               string
+	Fields             []string
+	Snapshot           catalog.Snapshot
+	MaxRows            int64
+	OutputPath         string
+	Settings           worker.RuntimeSettings
+	SourcePaths        []string
 }
 
-func (request tileWorkerRequest) query() tilequery.Query {
+func (request tileExecutionRequest) query() tilequery.Query {
 	return tilequery.Query{Cell: request.Cell, Square: request.Square}
 }
 
-type tileWorkerResponse struct {
-	Diagnostics *worker.TileDiagnostics `json:"diagnostics,omitempty"`
-	Result      *worker.TileResult      `json:"result,omitempty"`
-	Error       *tileWorkerError        `json:"error,omitempty"`
-}
-
-type tileWorkerError struct {
-	Kind        string `json:"kind"`
-	Message     string `json:"message"`
-	ActualBytes int64  `json:"actual_bytes,omitempty"`
-	LimitBytes  int64  `json:"limit_bytes,omitempty"`
-	ActualRows  int64  `json:"actual_rows,omitempty"`
-	LimitRows   int64  `json:"limit_rows,omitempty"`
-}
-
-const (
-	workerErrorGeneric        = "generic"
-	workerErrorOutputTooLarge = "output_too_large"
-	workerErrorTooManyRows    = "too_many_rows"
-	workerErrorDisk           = "disk"
-	workerErrorMemory         = "memory"
-	workerErrorUpstream       = "upstream"
-	workerErrorTimeout        = "timeout"
-	workerErrorCanceled       = "canceled"
-	workerErrorInvalidOutput  = "invalid_output"
-)
-
-func runIsolatedTileWorker(ctx context.Context, executable, cacheDir string, request tileWorkerRequest) (result worker.TileResult, err error) {
-	if ctx == nil {
-		return worker.TileResult{}, errors.New("run isolated tile worker: context is nil")
-	}
-	if executable == "" {
-		return worker.TileResult{}, errors.New("run isolated tile worker: executable is empty")
-	}
-	if cacheDir == "" {
-		return worker.TileResult{}, errors.New("run isolated tile worker: cache directory is empty")
-	}
-	started := time.Now()
-	plan, err := worker.BuildQueryPlan(request.query(), request.Fields, request.Snapshot.Schema)
-	if err != nil {
-		return worker.TileResult{}, err
-	}
-	query, err := worker.PrepareTileQuery(plan, request.Snapshot, request.SourcePaths, request.MaxRows)
-	if err != nil {
-		return worker.TileResult{}, err
-	}
-	slog.Info("tile worker started", "tile", request.query().String(), "release", request.Snapshot.Release,
-		"manifest_asset_count", len(request.Snapshot.Manifest), "cached_source_count", len(request.SourcePaths), "selected_asset_count", query.SelectedAssetCount,
-		"selected_asset_bytes", query.SelectedAssetBytes, "tile_timeout_sec", request.Settings.TileTimeout.Seconds())
-	workerDiagnostics := worker.TileDiagnostics{Stage: "process", SelectedAssetCount: query.SelectedAssetCount, SelectedAssetBytes: query.SelectedAssetBytes}
-	defer func() {
-		logLevel := slog.LevelInfo
-		if err != nil {
-			logLevel = slog.LevelWarn
-		}
-		slog.Log(ctx, logLevel, "tile worker finished", "tile", request.query().String(), "release", request.Snapshot.Release,
-			"elapsed_ms", time.Since(started).Milliseconds(), "stage", workerDiagnostics.Stage,
-			"selected_asset_count", workerDiagnostics.SelectedAssetCount, "selected_asset_bytes", workerDiagnostics.SelectedAssetBytes,
-			"planning_ms", workerDiagnostics.PlanningMS, "materialize_ms", workerDiagnostics.MaterializeMS,
-			"copy_ms", workerDiagnostics.CopyMS, "validation_ms", workerDiagnostics.ValidationMS, "error", err)
-	}()
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return worker.TileResult{}, fmt.Errorf("encode isolated tile request: %w", err)
-	}
-	if int64(len(payload)) > workerProtocolMaxBytes {
-		return worker.TileResult{}, fmt.Errorf("encode isolated tile request: payload exceeds %d bytes", workerProtocolMaxBytes)
-	}
-	command := exec.CommandContext(ctx, executable, "--mode=worker", "--cache-dir", cacheDir)
-	command.Env = append(os.Environ(), workerProtocolEnv+"="+workerProtocolValue)
-	command.Stdin = bytes.NewReader(payload)
-	var output boundedProtocolBuffer
-	output.limit = workerProtocolMaxBytes
-	var diagnostics boundedProtocolBuffer
-	diagnostics.limit = workerProtocolMaxBytes
-	command.Stdout = &output
-	command.Stderr = &diagnostics
-	if err := command.Run(); err != nil {
-		if ctx.Err() != nil {
-			return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker: %w", worker.ErrTileCanceled, ctx.Err())
-		}
-		if workerExitedOnFileSizeLimit(err) {
-			outputTooLarge, proofErr := worker.NewOutputTooLargeError(request.Settings.MaxOutputBytes)
-			if proofErr == nil {
-				return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker exited: %w", outputTooLarge, err)
-			}
-			return worker.TileResult{}, fmt.Errorf("%w: isolated tile worker exited: %w", worker.ErrOutputTooLarge, err)
-		}
-		if diagnostics.Len() != 0 {
-			return worker.TileResult{}, fmt.Errorf("isolated tile worker exited: %w: %s", err, strings.TrimSpace(diagnostics.String()))
-		}
-		return worker.TileResult{}, fmt.Errorf("isolated tile worker exited: %w", err)
-	}
-	if err := output.Err(); err != nil {
-		return worker.TileResult{}, fmt.Errorf("read isolated tile worker response: %w", err)
-	}
-	var response tileWorkerResponse
-	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
-		return worker.TileResult{}, fmt.Errorf("decode isolated tile worker response: %w", err)
-	}
-	if response.Diagnostics != nil {
-		workerDiagnostics = *response.Diagnostics
-		if workerDiagnostics.MaterializeProfile != "" {
-			slog.Debug("tile scan profile", "tile", request.query().String(), "release", request.Snapshot.Release,
-				"profile", workerDiagnostics.MaterializeProfile)
-		}
-	}
-	if response.Error != nil {
-		return worker.TileResult{}, decodeTileWorkerError(*response.Error)
-	}
-	if response.Result == nil {
-		return worker.TileResult{}, errors.New("decode isolated tile worker response: result and error are both absent")
-	}
-	return *response.Result, nil
-}
-
-func workerExitedOnFileSizeLimit(err error) bool {
-	var exitError *exec.ExitError
-	if !errors.As(err, &exitError) || exitError.ProcessState == nil {
-		return false
-	}
-	waitStatus, ok := exitError.Sys().(syscall.WaitStatus)
-	return ok && waitStatus.Signaled() && waitStatus.Signal() == syscall.SIGXFSZ
-}
-
-type boundedProtocolBuffer struct {
-	bytes.Buffer
-	limit int64
-	err   error
-}
-
-func (buffer *boundedProtocolBuffer) Write(value []byte) (int, error) {
-	if buffer.err != nil {
-		return 0, buffer.err
-	}
-	if int64(buffer.Len()+len(value)) > buffer.limit {
-		buffer.err = errWorkerProtocolResponseTooLarge
-		return 0, buffer.err
-	}
-	return buffer.Buffer.Write(value)
-}
-
-func (buffer *boundedProtocolBuffer) Err() error {
-	return buffer.err
-}
-
-func encodeTileWorkerErrorWithLimit(err error, maxOutputBytes int64) tileWorkerError {
-	result := tileWorkerError{Kind: workerErrorGeneric, Message: err.Error()}
-	var outputTooLarge *worker.OutputTooLargeError
-	var tooManyRows *worker.TooManyRowsError
-	switch {
-	case errors.As(err, &outputTooLarge):
-		result.Kind = workerErrorOutputTooLarge
-		result.ActualBytes = outputTooLarge.ActualBytes
-		result.LimitBytes = outputTooLarge.LimitBytes
-	case errors.As(err, &tooManyRows):
-		result.Kind = workerErrorTooManyRows
-		result.ActualRows = tooManyRows.ActualRows
-		result.LimitRows = tooManyRows.LimitRows
-	case errors.Is(err, worker.ErrOutputTooLarge):
-		result.Kind = workerErrorOutputTooLarge
-		if outputTooLarge, proofErr := worker.NewOutputTooLargeError(maxOutputBytes); proofErr == nil {
-			result.ActualBytes = outputTooLarge.ActualBytes
-			result.LimitBytes = outputTooLarge.LimitBytes
-		}
-	case errors.Is(err, worker.ErrDiskFailure):
-		result.Kind = workerErrorDisk
-	case errors.Is(err, worker.ErrOutOfMemory):
-		result.Kind = workerErrorMemory
-	case errors.Is(err, worker.ErrUpstream):
-		result.Kind = workerErrorUpstream
-	case errors.Is(err, worker.ErrTileTimeout):
-		result.Kind = workerErrorTimeout
-	case errors.Is(err, worker.ErrTileCanceled):
-		result.Kind = workerErrorCanceled
-	case errors.Is(err, worker.ErrInvalidOutput):
-		result.Kind = workerErrorInvalidOutput
-	}
-	return result
-}
-
-func decodeTileWorkerError(encoded tileWorkerError) error {
-	message := encoded.Message
-	if message == "" {
-		message = "isolated tile worker failed"
-	}
-	switch encoded.Kind {
-	case workerErrorOutputTooLarge:
-		return &worker.OutputTooLargeError{ActualBytes: encoded.ActualBytes, LimitBytes: encoded.LimitBytes}
-	case workerErrorTooManyRows:
-		return &worker.TooManyRowsError{ActualRows: encoded.ActualRows, LimitRows: encoded.LimitRows}
-	case workerErrorDisk:
-		return fmt.Errorf("%w: %s", worker.ErrDiskFailure, message)
-	case workerErrorMemory:
-		return fmt.Errorf("%w: %s", worker.ErrOutOfMemory, message)
-	case workerErrorUpstream:
-		return fmt.Errorf("%w: %s", worker.ErrUpstream, message)
-	case workerErrorTimeout:
-		return fmt.Errorf("%w: %s", worker.ErrTileTimeout, message)
-	case workerErrorCanceled:
-		return fmt.Errorf("%w: %s", worker.ErrTileCanceled, message)
-	case workerErrorInvalidOutput:
-		return fmt.Errorf("%w: %s", worker.ErrInvalidOutput, message)
-	default:
-		return errors.New(message)
-	}
-}
-
-func runWorkerProtocol(ctx context.Context) error {
-	if ctx == nil {
-		return errors.New("run worker protocol: context is nil")
-	}
-	decoder := json.NewDecoder(io.LimitReader(os.Stdin, workerProtocolMaxBytes))
-	var request tileWorkerRequest
-	if err := decoder.Decode(&request); err != nil {
-		return fmt.Errorf("decode worker request: %w", err)
-	}
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errors.New("decode worker request: multiple messages")
-		}
-		return fmt.Errorf("decode worker request trailer: %w", err)
-	}
-	diagnostics := worker.TileDiagnostics{Stage: "initialize"}
-	result, err := executeWorkerRequest(ctx, request, &diagnostics)
-	response := tileWorkerResponse{Result: &result, Diagnostics: &diagnostics}
-	if err != nil {
-		response.Result = nil
-		encoded := encodeTileWorkerErrorWithLimit(err, request.Settings.MaxOutputBytes)
-		response.Error = &encoded
-	}
-	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
-		return fmt.Errorf("encode worker response: %w", err)
-	}
-	return nil
-}
-
-func executeWorkerRequest(ctx context.Context, request tileWorkerRequest, diagnostics *worker.TileDiagnostics) (result worker.TileResult, err error) {
+func executeTileRequest(ctx context.Context, request tileExecutionRequest, diagnostics *worker.TileDiagnostics) (result worker.TileResult, err error) {
 	if request.OutputPath == "" {
 		return worker.TileResult{}, errors.New("worker request output path is empty")
 	}
@@ -656,6 +452,17 @@ func executeWorkerRequest(ctx context.Context, request tileWorkerRequest, diagno
 	if err != nil {
 		return worker.TileResult{}, err
 	}
+	if err := os.MkdirAll(request.Settings.ScratchDirectory, 0o750); err != nil {
+		return worker.TileResult{}, fmt.Errorf("create scratch root: %w", err)
+	}
+	scratchDirectory, err := os.MkdirTemp(request.Settings.ScratchDirectory, "build-*")
+	if err != nil {
+		return worker.TileResult{}, fmt.Errorf("create build scratch directory: %w", err)
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(scratchDirectory)) }()
+	request.Settings.ScratchDirectory = scratchDirectory
+	request.Settings.MaxOutputBytes = math.MaxInt64
+
 	database, err := sql.Open("duckdb", "")
 	if err != nil {
 		return worker.TileResult{}, fmt.Errorf("open worker DuckDB: %w", err)
@@ -684,8 +491,16 @@ func executeWorkerRequest(ctx context.Context, request tileWorkerRequest, diagno
 			err = fmt.Errorf("%w; close worker DuckDB connection: %w", err, closeErr)
 		}
 	}()
-	if err := configureTileConnection(ctx, connection); err != nil {
+	if err := configureTileConnectionDirectory(ctx, connection, request.ExtensionDirectory); err != nil {
 		return worker.TileResult{}, err
+	}
+	if request.AssetCAFile != "" {
+		if _, err := connection.ExecContext(ctx, "SET ca_cert_file = ?", request.AssetCAFile); err != nil {
+			return worker.TileResult{}, fmt.Errorf("set asset CA file: %w", err)
+		}
+		if _, err := connection.ExecContext(ctx, "SET enable_server_cert_verification = true"); err != nil {
+			return worker.TileResult{}, fmt.Errorf("enable asset certificate verification: %w", err)
+		}
 	}
 	return worker.BuildTileWithSettings(ctx, worker.RuntimeTileRequest{
 		Conn:        connection,
@@ -710,20 +525,15 @@ func rejectionError(rejection cache.SizeRejection) error {
 	}
 }
 
-func configureTileConnection(ctx context.Context, connection *sql.Conn) error {
+func configureTileConnectionDirectory(ctx context.Context, connection *sql.Conn, extensionDirectory string) error {
 	if ctx == nil {
 		return errors.New("configure tile DuckDB connection: context is nil")
 	}
 	if connection == nil {
 		return errors.New("configure tile DuckDB connection: connection is nil")
 	}
-	if extensionDirectory := os.Getenv(duckdbExtensionDirectoryEnv); extensionDirectory != "" {
+	if extensionDirectory != "" {
 		if _, err := connection.ExecContext(ctx, "SET extension_directory = ?", extensionDirectory); err != nil {
-			return fmt.Errorf("set DuckDB extension directory: %w", err)
-		}
-	} else if dataPath := os.Getenv(duckdbDataPathEnv); dataPath != "" {
-		directory := filepath.Join(dataPath, "extensions")
-		if _, err := connection.ExecContext(ctx, "SET extension_directory = ?", directory); err != nil {
 			return fmt.Errorf("set DuckDB extension directory: %w", err)
 		}
 	}

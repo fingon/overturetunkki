@@ -15,7 +15,6 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		return
 	}
-	assert.Equal(t, cfg.Mode, ModeSupervisor)
 	assert.Equal(t, cfg.Listen, DefaultListen)
 	assert.Equal(t, cfg.CatalogURL, DefaultCatalogURL)
 	assert.Equal(t, cfg.CatalogHost, "stac.overturemaps.org")
@@ -44,7 +43,6 @@ func TestParseDefaults(t *testing.T) {
 
 func TestParseCommandLineOverrides(t *testing.T) {
 	cfg, err := Parse([]string{
-		"--mode=worker",
 		"--listen=127.0.0.1:9090",
 		"--catalog-url=http://localhost:8081/catalog.json",
 		"--catalog-host=localhost:8081",
@@ -73,7 +71,6 @@ func TestParseCommandLineOverrides(t *testing.T) {
 	if err != nil {
 		return
 	}
-	assert.Equal(t, cfg.Mode, ModeWorker)
 	assert.Equal(t, cfg.Listen, "127.0.0.1:9090")
 	assert.Equal(t, cfg.CatalogURL, "http://localhost:8081/catalog.json")
 	assert.Equal(t, cfg.CatalogHost, "localhost:8081")
@@ -101,7 +98,6 @@ func TestParseCommandLineOverrides(t *testing.T) {
 
 func TestParseEnvironmentOverrides(t *testing.T) {
 	t.Setenv("OVERTURE_CATALOG_STALE_GRACE", "0s")
-	t.Setenv("OVERTURE_MODE", "worker")
 	t.Setenv("OVERTURE_LISTEN", ":9091")
 	t.Setenv("OVERTURE_FIELDS", "id,geometry,names")
 	t.Setenv("OVERTURE_MAX_TILE_BYTES", "1000")
@@ -116,7 +112,6 @@ func TestParseEnvironmentOverrides(t *testing.T) {
 		return
 	}
 	assert.Equal(t, cfg.CatalogStaleGrace, time.Duration(0))
-	assert.Equal(t, cfg.Mode, ModeWorker)
 	assert.Equal(t, cfg.Listen, ":9091")
 	assert.DeepEqual(t, cfg.Fields, []string{"id", "geometry", "names"})
 	assert.Equal(t, cfg.MaxTileBytes, int64(1000))
@@ -151,7 +146,6 @@ func TestValidate(t *testing.T) {
 		mutate  func(*Config)
 		message string
 	}{
-		{name: "invalid mode", mutate: func(cfg *Config) { cfg.Mode = "other" }, message: "mode"},
 		{name: "invalid listen port", mutate: func(cfg *Config) { cfg.Listen = ":0" }, message: "nonzero port"},
 		{name: "invalid listen range", mutate: func(cfg *Config) { cfg.Listen = ":65536" }, message: "1 through 65535"},
 		{name: "invalid catalog scheme", mutate: func(cfg *Config) { cfg.CatalogURL = "ftp://example.com/catalog.json" }, message: "HTTP(S)"},

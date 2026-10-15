@@ -5,7 +5,8 @@ GeoParquet POI tiles by OpenStreetMap XYZ square or H3 cell. The service discove
 pins each request to a catalog version, queries the places assets through
 DuckDB, selects source partitions by conservative spatial bounds, and keeps
 successful squares in a bounded disk cache. H3 results are composed from at most
-four squares and returned without persistent H3 caching. Spatial pruning also applies to
+four squares. Completed oversized tiles are retained when they fit the cache,
+but are never served. Ordinary H3 results remain temporary. Spatial pruning also applies to
 pentagons and tiles crossing H3 face boundaries. Tiles cover places with valid
 source bboxes and exclude missing or malformed bboxes. The HTTP API reports request
 IDs, freshness changes, finer-cell guidance, and retryable
@@ -26,18 +27,20 @@ make test
 make build
 ```
 
-On macOS, install Go and Xcode Command Line Tools (`xcode-select --install`).
-`make build` builds `bin/overture-client`; `make test` runs the client tests.
-The client uses CGO for H3 validation and supports Apple Silicon and Intel Macs.
-On Linux these targets build and test the service and native probe as well.
-`make build-client` and `make test-client` select the client on either platform.
+Linux and macOS (Apple Silicon and Intel) support the service, library, and
+client. On macOS, install Go and Xcode Command Line Tools. `make test` fetches
+checksum-pinned DuckDB extensions and tests every package; `make build` builds
+all three binaries. `make build-client` and `make test-client` select just the
+client.
 
-The service runs on Linux. A local Linux service needs a writable absolute cache
-directory, for example:
+A local service needs a writable absolute cache directory and the extensions:
 
 ```sh
+make fetch-extensions
 mkdir -p "$PWD/.cache/overture"
-OVERTURE_CACHE_DIR="$PWD/.cache/overture" ./bin/overturetunkki
+OVERTURE_CACHE_DIR="$PWD/.cache/overture" \
+OVERTURE_DUCKDB_EXTENSION_DIRECTORY="$PWD/cmd/overturetunkki/kodata/extensions" \
+  ./bin/overturetunkki
 ```
 
 Inspect the catalog and download one complete tile with the CLI:
@@ -65,15 +68,72 @@ Content-Length, and quoted `sha256:<lowercase-hex>` ETag; it validates both
 Parquet magic markers before atomically publishing the file. Existing files
 are preserved unless `--force` is supplied.
 
+## Embed in Go
+
+Import `github.com/fingon/overturetunkki` to retrieve tiles directly as local
+files. DuckDB runs in-process; no listener, worker executable, or special main
+function is required. Supply the matching pinned extensions at deployment.
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log/slog"
+
+    overture "github.com/fingon/overturetunkki"
+)
+
+func run(ctx context.Context) (err error) {
+    options := overture.DefaultOptions("/absolute/path/to/cache")
+    options.ExtensionDirectory = "/absolute/path/to/extensions"
+    service, err := overture.Open(ctx, options)
+    if err != nil {
+        return err
+    }
+    defer func() { err = errors.Join(err, service.Close()) }()
+
+    tile, err := service.Get(ctx, overture.TileRequest{
+        Square: &overture.Square{Z: 10, X: 583, Y: 296},
+    })
+    if err != nil {
+        return err
+    }
+    defer func() { err = errors.Join(err, tile.Close()) }()
+    fmt.Println(tile.Path) // Read this file before releasing the tile.
+    return nil
+}
+
+func main() {
+    if err := run(context.Background()); err != nil {
+        slog.Error("retrieve tile", "error", err)
+    }
+}
+```
+
+Use `Cell: "8928308280fffff"` for H3. `service.Catalog(ctx)` exposes metadata;
+set `TileRequest.CatalogVersion` to require that version. Handle typed size and
+catalog-change errors with `errors.As`, or exported sentinels with `errors.Is`.
+Options do not read environment variables or change global logging. An optional
+`CatalogClient` supplies a caller-owned STAC client; `AssetCAFile` supplies a
+custom PEM CA bundle for DuckDB asset reads.
+
+Tile paths are read-only and remain pinned until `tile.Close()` or
+`service.Close()`. Ordinary XYZ files stay in the bounded disk cache; ordinary
+H3 files are deleted after the final holder closes them. A service exclusively
+owns its cache directory. Always close it, including after context cancellation.
+
 ## Service configuration
 
 Every service flag has the corresponding `OVERTURE_` environment variable.
-The default mode is the supervisor; worker mode is an internal subprocess
-protocol and is not a standalone HTTP service.
+The HTTP executable uses the same in-process tile engine as the Go API.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
-| `--mode` | `OVERTURE_MODE` | `supervisor` |
+| `--extension-directory` | `OVERTURE_DUCKDB_EXTENSION_DIRECTORY` | DuckDB default; ko uses bundled assets |
+| `--asset-ca-file` | `OVERTURE_ASSET_CA_FILE` | system trust |
 | `--listen` | `OVERTURE_LISTEN` | `:8080` |
 | `--catalog-url` | `OVERTURE_CATALOG_URL` | `https://stac.overturemaps.org/catalog.json` |
 | `--catalog-host` | `OVERTURE_CATALOG_HOST` | `stac.overturemaps.org` |
@@ -110,7 +170,12 @@ HTTP buffers, and scratch. `cache-max-bytes` includes complete files and
 reservations, including old generations and pinned open readers. Set container
 memory, CPU, cache, and scratch limits in addition to these application
 limits. `max-tile-rows` is an early rejection bound; `max-tile-bytes` is the
-hard complete compressed-output bound.
+serving limit checked after COPY. Temporary output may exceed its reservation.
+A completed oversized file is validated and kept if it fits the cache; later
+requests return a size error without rebuilding it. Otherwise it is deleted
+and the rejection is remembered. Row-limit failures have no complete file to
+retain. In-process memory settings do not isolate native crashes or bound total
+RSS, and query cancellation relies on DuckDB honoring its context.
 
 Catalog validation is shared across requests and renewed daily by default,
 using `catalog-timeout` for each complete check. During upstream rate limiting
@@ -138,10 +203,12 @@ west to east, and Y from north to south. The HTTP endpoint is
 GeoParquet, with the same limits and integrity headers as H3 requests.
 
 H3 requests fetch at most four covering squares, reuse their cached ancestors,
-and filter the combined rows by exact H3 membership. If any source square or
-final H3 response exceeds the limits, the server returns `422 tile_too_large`.
-It does not subdivide sources or retry another covering zoom. H3 responses are
-temporary files deleted after the last reader closes. POIs outside the Web
+and filter the combined rows by exact H3 membership. If a source exceeds the row limit or the final H3 response exceeds serving
+limits, the server returns `422 tile_too_large`. Completed oversized squares
+can still be used internally as sources.
+It does not subdivide sources or retry another covering zoom. Ordinary H3 responses are
+temporary files deleted after the last reader closes; completed oversized H3
+files can be retained as rejected cache entries. POIs outside the Web
 Mercator latitude range (approximately ±85.0511°) are omitted; wholly polar
 cells return valid empty files, and cells crossing that limit return only their
 in-range POIs.
@@ -211,7 +278,7 @@ image, then runs an opt-in Podman lifecycle test using deterministic local
 STAC and GeoParquet fixtures; it checks the default cache without a mount,
 then uses a read-only root, a writable bounded
 cache volume, an independent GeoParquet reader, CLI download/304/stale-version
-checks, rollover, outages, worker replacement, and restart. It does not
+checks, rollover, outages, failed-build recovery, and restart. It does not
 contact live S3. Live upstream tests, if added, must remain separately opt-in.
 
 The native image build is pinned in `build/versions.env`: Go 1.27.1, ko
@@ -235,7 +302,8 @@ Builds default to the host architecture; another `TARGET_ARCH` requires
 Podman emulation support. GitHub Actions checks Linux amd64/arm64 and runs
 Linux image smoke and lifecycle tests, caching Go dependencies and builds
 for both host and Podman jobs, plus lint tool environments and results.
-The service remains Linux-only; native macOS service builds are unsupported.
+Native Linux and macOS service and library builds are supported. Container
+images remain Linux-only.
 
 Successful pushes to `main` publish the service as a multi-platform image at
 `ghcr.io/fingon/overturetunkki/service:latest` for Linux amd64 and arm64.

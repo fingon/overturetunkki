@@ -15,23 +15,13 @@ import (
 	"gotest.tools/v3/assert"
 )
 
-func TestRunModesStopOnCancellation(t *testing.T) {
+func TestRunStopsOnCancellation(t *testing.T) {
 	cfg, err := config.Parse(nil)
 	assert.NilError(t, err)
-	if err != nil {
-		return
-	}
 	cfg.CacheDir = t.TempDir()
-	cases := []config.Mode{config.ModeSupervisor, config.ModeWorker}
-	for _, mode := range cases {
-		t.Run(string(mode), func(t *testing.T) {
-			modeConfig := cfg
-			modeConfig.Mode = mode
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			assert.NilError(t, Run(ctx, modeConfig))
-		})
-	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.NilError(t, Run(ctx, cfg))
 }
 
 func TestRunDeadlineIsReturned(t *testing.T) {
@@ -80,21 +70,6 @@ func TestTileProviderRemembersOutputSizeRejectionWithoutByteCounts(t *testing.T)
 				assert.Equal(t, rejection.Threshold(), int64(100))
 			}
 		})
-	}
-}
-
-func TestEncodeTileWorkerErrorIncludesOutputLimit(t *testing.T) {
-	encoded := encodeTileWorkerErrorWithLimit(worker.ErrOutputTooLarge, 100)
-	assert.Equal(t, encoded.Kind, workerErrorOutputTooLarge)
-	assert.Equal(t, encoded.ActualBytes, int64(101))
-	assert.Equal(t, encoded.LimitBytes, int64(100))
-
-	decoded := decodeTileWorkerError(encoded)
-	var outputTooLarge *worker.OutputTooLargeError
-	assert.Assert(t, errors.As(decoded, &outputTooLarge))
-	if outputTooLarge != nil {
-		assert.Equal(t, outputTooLarge.ActualBytes, int64(101))
-		assert.Equal(t, outputTooLarge.LimitBytes, int64(100))
 	}
 }
 

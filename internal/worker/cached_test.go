@@ -24,11 +24,6 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 	if extensionDirectory == "" {
 		t.Skip("requires bundled spatial extension; make test on Linux supplies it")
 	}
-	// Output limits have separate subprocess tests; keep this query/export test
-	// from changing the test process's permanent file-size limit.
-	previousLimit := setFileSizeLimit
-	setFileSizeLimit = func(int64) error { return nil }
-	t.Cleanup(func() { setFileSizeLimit = previousLimit })
 	for _, test := range []struct {
 		name  string
 		point h3.LatLng

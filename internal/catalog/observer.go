@@ -55,6 +55,7 @@ type Observer struct {
 	running  bool
 	inFlight *observationCall
 	state    observerState
+	closed   bool
 }
 
 type observerState struct {
@@ -74,6 +75,7 @@ type observerState struct {
 }
 
 type observationCall struct {
+	cancel   context.CancelFunc
 	done     chan struct{}
 	snapshot Snapshot
 	err      error
@@ -126,6 +128,10 @@ func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 	}
 
 	o.mu.Lock()
+	if o.closed {
+		o.mu.Unlock()
+		return Snapshot{}, ErrCatalogUnavailable
+	}
 	now := o.now()
 	o.expireLocked(now)
 	if o.state.ready && now.Before(o.state.lastSuccess.Add(o.pollInterval)) {
@@ -139,6 +145,7 @@ func (o *Observer) Refresh(ctx context.Context) (Snapshot, error) {
 		o.inFlight = call
 		o.state.pending = Observation{}
 		checkContext, cancel := detachedCheckContext(ctx)
+		call.cancel = cancel
 		go o.runCheck(checkContext, call, cancel)
 	}
 	if o.state.ready {
@@ -313,6 +320,9 @@ func (o *Observer) observe(observation Observation) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.closed {
+		return
+	}
 	if o.state.ready {
 		if observationChanged(o.state.identity, observation) {
 			o.fenceLocked()
@@ -326,6 +336,9 @@ func (o *Observer) observe(observation Observation) {
 func (o *Observer) finishCheck(call *observationCall, snapshot Snapshot, err error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.closed {
+		err = context.Canceled
+	}
 	if err == nil {
 		observation := snapshotObservation(snapshot)
 		if err = o.validateObservationLocked(observation); err == nil {
@@ -455,4 +468,19 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		clone.Schema.Columns = append([]Column(nil), snapshot.Schema.Columns...)
 	}
 	return clone
+}
+
+// Close fences generations, cancels a detached freshness check, and waits for it.
+func (o *Observer) Close() {
+	o.mu.Lock()
+	o.closed = true
+	o.fenceLocked()
+	call := o.inFlight
+	if call != nil {
+		call.cancel()
+	}
+	o.mu.Unlock()
+	if call != nil {
+		<-call.done
+	}
 }

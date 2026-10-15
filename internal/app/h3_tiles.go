@@ -161,7 +161,7 @@ func (provider *tileProvider) composeH3(ctx context.Context, generation catalog.
 	sources := tileSources{}
 	defer func() { err = errors.Join(err, sources.Close()) }()
 	for _, square := range cover {
-		source, sourceErr := provider.Get(ctx, generation, tilequery.Query{Square: &square})
+		source, sourceErr := provider.get(ctx, generation, tilequery.Query{Square: &square}, true)
 		if sourceErr != nil {
 			if errors.Is(sourceErr, worker.ErrTooManyRows) || errors.Is(sourceErr, worker.ErrOutputTooLarge) {
 				return tile, nil, &worker.SourceSquareError{Square: square, Err: sourceErr}
@@ -210,9 +210,20 @@ func (provider *tileProvider) composeH3(ctx context.Context, generation catalog.
 		if planErr != nil {
 			return planErr
 		}
-		result, buildErr := provider.runWorker(buildContext, plan, outputPath, tileBuildOptions{Snapshot: generation.Snapshot, Query: query, SourcePaths: sources.paths})
+		result, buildErr := provider.executeTile(buildContext, plan, outputPath, tileBuildOptions{Snapshot: generation.Snapshot, Query: query, SourcePaths: sources.paths})
 		if buildErr != nil {
 			return buildErr
+		}
+		if result.SizeBytes > provider.maxBytes {
+			sizeErr := &worker.OutputTooLargeError{ActualBytes: result.SizeBytes, LimitBytes: provider.maxBytes}
+			if _, publishErr := provider.cache.Publish(key, outputPath, generation.Snapshot.CatalogVersion); publishErr != nil {
+				if errors.Is(publishErr, cache.ErrCapacityUnavailable) {
+					slog.Debug("oversized H3 tile not retained", "tile", key.Tile, "size_bytes", result.SizeBytes, "error", publishErr)
+					return sizeErr
+				}
+				return errors.Join(sizeErr, fmt.Errorf("cache oversized H3 tile: %w", publishErr))
+			}
+			return sizeErr
 		}
 		if shrinkErr := reservation.Shrink(result.SizeBytes); shrinkErr != nil {
 			return shrinkErr

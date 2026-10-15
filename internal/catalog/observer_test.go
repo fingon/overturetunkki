@@ -495,3 +495,27 @@ func advanceObserverFreshness(observer *Observer) {
 	now := observer.now().Add(observer.pollInterval)
 	observer.now = func() time.Time { return now }
 }
+
+func TestObserverCloseCancelsDetachedCheck(t *testing.T) {
+	checker := &observerChecker{steps: []observerCheckStep{{wait: make(chan struct{})}}, started: make(chan int, 1)}
+	observer, err := NewObserver(checker, ObserverOptions{PollInterval: time.Minute})
+	assert.NilError(t, err)
+	done := make(chan error, 1)
+	go func() { _, err := observer.Refresh(context.Background()); done <- err }()
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("catalog check did not start")
+	}
+	observer.Close()
+	observer.Close()
+	select {
+	case err := <-done:
+		assert.Assert(t, errors.Is(err, context.Canceled))
+	case <-time.After(time.Second):
+		t.Fatal("catalog check survived Close")
+	}
+	_, err = observer.Refresh(t.Context())
+	assert.Assert(t, errors.Is(err, ErrCatalogUnavailable))
+	assert.Assert(t, !observer.Ready())
+}

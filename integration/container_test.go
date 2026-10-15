@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,7 +68,6 @@ type fixtureServer struct {
 	mu                 sync.Mutex
 	mode               fixtureMode
 	release            string
-	assetDelay         time.Duration
 	assetBytes         []byte
 	sanFranciscoBytes  []byte
 	helsinkiBytes      []byte
@@ -295,39 +293,9 @@ func TestContainerLifecycle(t *testing.T) {
 	fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: assetFailureCell, wantStatus: http.StatusServiceUnavailable})
 	fixture.setMode(fixtureNormal)
 
-	if runtime.GOOS == "linux" {
-		t.Run("worker death and replacement", func(t *testing.T) {
-			fixture.setAssetDelay(5 * time.Second)
-			uncachedCell := testCell(t, 8)
-			responseDone := make(chan int, 1)
-			go func() {
-				response, err := container.getTile(client, newCatalog.CatalogVersion, uncachedCell, "")
-				if err != nil {
-					responseDone <- 0
-					return
-				}
-				status := response.StatusCode
-				if err := response.Body.Close(); err != nil {
-					responseDone <- 0
-					return
-				}
-				responseDone <- status
-			}()
-			workerPID := waitForWorkerPID(t, container.name)
-			assert.NilError(t, killProcess(workerPID))
-			select {
-			case status := <-responseDone:
-				assert.Assert(t, status >= http.StatusInternalServerError)
-			case <-time.After(10 * time.Second):
-				t.Fatal("worker death did not finish the tile request")
-			}
-			fixture.setAssetDelay(0)
-			body, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: uncachedCell, wantStatus: http.StatusOK})
-			validateTile(t, body)
-		})
-	} else {
-		t.Log("worker PID replacement is only exercised on Linux Podman hosts")
-	}
+	// The preceding failed build must not prevent a subsequent request.
+	body, _ := fetchTile(t, tileFetchOptions{client: client, container: container, version: newCatalog.CatalogVersion, cell: assetFailureCell, wantStatus: http.StatusOK})
+	validateTile(t, body)
 
 	container.remove()
 	container = newServiceContainer(t, image, fixture, cacheDirectory)
@@ -486,7 +454,6 @@ func (fixture *fixtureServer) serveHTTP(responseWriter http.ResponseWriter, requ
 	fixture.mu.Lock()
 	mode := fixture.mode
 	release := fixture.release
-	delay := fixture.assetDelay
 	fixture.mu.Unlock()
 	isAsset := strings.HasSuffix(request.URL.Path, ".parquet")
 	if mode == fixtureCatalogDown && !isAsset {
@@ -498,15 +465,6 @@ func (fixture *fixtureServer) serveHTTP(responseWriter http.ResponseWriter, requ
 		return
 	}
 	if isAsset {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-request.Context().Done():
-				return
-			}
-		}
 		assetBytes := fixture.assetBytes
 		switch {
 		case strings.HasPrefix(filepath.Base(request.URL.Path), "part-00002-"):
@@ -590,12 +548,6 @@ func (fixture *fixtureServer) setRelease(release string) {
 func (fixture *fixtureServer) setMode(mode fixtureMode) {
 	fixture.mu.Lock()
 	fixture.mode = mode
-	fixture.mu.Unlock()
-}
-
-func (fixture *fixtureServer) setAssetDelay(delay time.Duration) {
-	fixture.mu.Lock()
-	fixture.assetDelay = delay
 	fixture.mu.Unlock()
 }
 
@@ -733,32 +685,6 @@ func waitForStatus(t *testing.T, _ *http.Client, status func() int, want int) {
 	t.Fatalf("service did not return status %d", want)
 }
 
-func waitForWorkerPID(t *testing.T, name string) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		output, err := commandOutput(containerCommand, "top", name, "hpid", "args")
-		if err == nil {
-			for line := range strings.SplitSeq(output, "\n") {
-				if !strings.Contains(line, "--mode=worker") {
-					continue
-				}
-				fields := strings.Fields(line)
-				if len(fields) == 0 {
-					continue
-				}
-				pid, err := strconv.Atoi(fields[0])
-				if err == nil && pid > 0 {
-					return pid
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("service did not start an isolated worker; logs:\n%s", podmanLogs(t, name))
-	return 0
-}
-
 func testCell(tb testing.TB, resolution int) h3.Cell {
 	tb.Helper()
 	cell, err := h3.LatLngToCell(h3.NewLatLng(37.7749, -122.4194), resolution)
@@ -806,17 +732,6 @@ func tlsKeyPair(certificate, key []byte) (tls.Certificate, error) {
 func sha256Bytes(value []byte) []byte {
 	digest := sha256.Sum256(value)
 	return digest[:]
-}
-
-func killProcess(pid int) error {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("find worker process %d: %w", pid, err)
-	}
-	if err := process.Kill(); err != nil {
-		return fmt.Errorf("kill worker process %d: %w", pid, err)
-	}
-	return nil
 }
 
 func podmanLogs(t *testing.T, name string) string {

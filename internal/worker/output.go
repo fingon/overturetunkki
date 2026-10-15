@@ -48,16 +48,6 @@ type CopyRequest struct {
 	MaxBytes   int64
 }
 
-func SetFileSizeLimit(maxBytes int64) error {
-	if maxBytes <= 0 {
-		return fmt.Errorf("file-size limit must be positive, got %d", maxBytes)
-	}
-	if err := setFileSizeLimit(maxBytes); err != nil {
-		return fmt.Errorf("set RLIMIT_FSIZE to %d bytes: %w", maxBytes, err)
-	}
-	return nil
-}
-
 func DisableCopySpill(ctx context.Context, conn *sql.Conn) error {
 	if ctx == nil {
 		return errors.New("disable COPY spill: context is nil")
@@ -95,9 +85,6 @@ func CopyWithOutputLimit(ctx context.Context, request CopyRequest) (CopyResult, 
 	}
 
 	if err := DisableCopySpill(ctx, request.Conn); err != nil {
-		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyWorkerError(err))
-	}
-	if err := SetFileSizeLimit(request.MaxBytes); err != nil {
 		return CopyResult{}, cleanupAfterFailure(request.OutputPath, classifyWorkerError(err))
 	}
 
@@ -151,9 +138,9 @@ func classifyCopyError(err error, maxBytes int64) error {
 		strings.Contains(lowerMessage, "file too large") {
 		outputTooLarge, proofErr := NewOutputTooLargeError(maxBytes)
 		if proofErr != nil {
-			return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", ErrOutputTooLarge, maxBytes, err)
+			return fmt.Errorf("%w: filesystem rejected COPY at %d bytes: %w", ErrOutputTooLarge, maxBytes, err)
 		}
-		return fmt.Errorf("%w: RLIMIT_FSIZE rejected COPY at %d bytes: %w", outputTooLarge, maxBytes, err)
+		return fmt.Errorf("%w: filesystem rejected COPY at %d bytes: %w", outputTooLarge, maxBytes, err)
 	}
 	return classifyWorkerError(fmt.Errorf("DuckDB COPY failed: %w", err))
 }

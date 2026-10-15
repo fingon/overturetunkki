@@ -207,9 +207,6 @@ func (c *Cache) publish(key Key, stagingPath, currentCatalogVersion string, rese
 	if reservation != nil && (reservation.cache != c || reservation.released || reservation.committed || reservation.published) {
 		return Entry{}, fmt.Errorf("publish cache reservation: %w", ErrInvalidReservation)
 	}
-	if reservation != nil && actualSize > reservation.reservedBytes {
-		return Entry{}, fmt.Errorf("publish cache tile is %d bytes, reservation is %d bytes: %w", actualSize, reservation.reservedBytes, ErrCapacityUnavailable)
-	}
 	if existing := c.entries[digest]; existing != nil {
 		if err := removeCachePath(stagingPath); err != nil {
 			return Entry{}, fmt.Errorf("remove duplicate cache staging %q: %w", stagingPath, err)
@@ -252,6 +249,7 @@ func (c *Cache) publish(key Key, stagingPath, currentCatalogVersion string, rese
 		reservation.published = true
 		reservation.released = true
 	}
+	c.signalCapacityLocked()
 	return entry.Entry, nil
 }
 
@@ -472,6 +470,10 @@ func (c *Cache) removeEntryLocked(entry *cacheEntry) error {
 }
 
 func (c *Cache) makeRoomLocked(requiredBytes int64, currentCatalogVersion string, reservedBytes, reservedEntries int64) error {
+	if requiredBytes > c.maxBytes {
+		return fmt.Errorf("%w: completed tile is %d bytes, cache limit is %d bytes", ErrCapacityUnavailable, requiredBytes, c.maxBytes)
+	}
+
 	for c.usedBytes+c.reservedBytes-reservedBytes+requiredBytes > c.maxBytes || c.usedEntries+c.reservedEntries-reservedEntries+1 > c.maxEntries {
 		if err := c.evictOneLocked(currentCatalogVersion); err != nil {
 			return err

@@ -7,19 +7,30 @@ repository_directory=$(cd -- "$script_directory/.." && pwd)
 source "$repository_directory/build/versions.env"
 
 target_architecture=${1:-$(go env GOARCH)}
-case "$target_architecture" in
-amd64)
+target_os=${2:-$(go env GOOS)}
+case "$target_os/$target_architecture" in
+linux/amd64)
 	duckdb_platform=linux_amd64
 	httpfs_checksum=$HTTPFS_EXTENSION_AMD64_GZ_SHA256
 	spatial_checksum=$SPATIAL_EXTENSION_AMD64_GZ_SHA256
 	;;
-arm64)
+linux/arm64)
 	duckdb_platform=linux_arm64
 	httpfs_checksum=$HTTPFS_EXTENSION_ARM64_GZ_SHA256
 	spatial_checksum=$SPATIAL_EXTENSION_ARM64_GZ_SHA256
 	;;
+darwin/amd64)
+	duckdb_platform=osx_amd64
+	httpfs_checksum=$HTTPFS_EXTENSION_DARWIN_AMD64_GZ_SHA256
+	spatial_checksum=$SPATIAL_EXTENSION_DARWIN_AMD64_GZ_SHA256
+	;;
+darwin/arm64)
+	duckdb_platform=osx_arm64
+	httpfs_checksum=$HTTPFS_EXTENSION_DARWIN_ARM64_GZ_SHA256
+	spatial_checksum=$SPATIAL_EXTENSION_DARWIN_ARM64_GZ_SHA256
+	;;
 *)
-	echo "unsupported DuckDB extension architecture: $target_architecture" >&2
+	echo "unsupported DuckDB extension platform: $target_os/$target_architecture" >&2
 	exit 1
 	;;
 esac
@@ -39,8 +50,18 @@ download_extension() {
 	local output_path="$temporary_directory/$extension_name.duckdb_extension"
 	local url="https://extensions.duckdb.org/v$DUCKDB_VERSION/$duckdb_platform/$extension_name.duckdb_extension.gz"
 
-	curl --fail --location --proto '=https' --tlsv1.3 --retry 3 --output "$archive_path" "$url"
-	printf '%s  %s\n' "$expected_checksum" "$archive_path" | sha256sum --check --strict
+	curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$archive_path" "$url"
+	local actual_checksum
+	if command -v shasum >/dev/null; then
+		actual_checksum=$(shasum -a 256 "$archive_path")
+	else
+		actual_checksum=$(sha256sum "$archive_path")
+	fi
+	actual_checksum=${actual_checksum%% *}
+	if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+		echo "checksum mismatch for $url" >&2
+		exit 1
+	fi
 	gzip --decompress --stdout "$archive_path" > "$output_path"
 	for output_directory in "${output_directories[@]}"; do
 		cp -- "$output_path" "$output_directory/$extension_name.duckdb_extension"
