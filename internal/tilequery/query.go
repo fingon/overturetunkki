@@ -6,6 +6,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/uber/h3-go/v4"
 )
 
 const (
@@ -192,4 +194,18 @@ func latitudeRow(latitudeDeg float64, count int) int {
 	latitudeRad := latitudeDeg / DegreesPerRadian
 	row := int(math.Floor((1 - math.Asinh(math.Tan(latitudeRad))/math.Pi) / 2 * float64(count)))
 	return max(0, min(count-1, row))
+}
+
+func MinimumXYZZoom(minResolution int) (int, error) {
+	areaM2, err := h3.HexagonAreaAvgM2(minResolution)
+	if err != nil {
+		return 0, fmt.Errorf("derive minimum XYZ zoom: %w", err)
+	}
+	if minResolution == 0 {
+		return 0, nil
+	}
+	const equatorialRadiusM = 6378137.0
+	circumferenceM := 2 * math.Pi * equatorialRadiusM
+	zoom := int(math.Round(math.Log2(circumferenceM*circumferenceM/areaM2) / 2))
+	return min(MaxZoom, max(0, zoom)), nil
 }

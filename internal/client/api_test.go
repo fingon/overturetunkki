@@ -230,3 +230,19 @@ func testCellString(t *testing.T) string {
 	assert.NilError(t, err)
 	return cell.String()
 }
+
+func TestXYZRefinementDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		zoom, suggested int
+		want            string
+	}{
+		{0, 7, "request all descendants covering this square at zoom 7"},
+		{6, 7, "request all four children at zoom 7"},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			canRefine := true
+			response := ErrorResponse{Zoom: &test.zoom, SuggestedZoom: &test.suggested, CanRefine: &canRefine}
+			assert.Equal(t, response.refinementDiagnostic(), test.want)
+		})
+	}
+}

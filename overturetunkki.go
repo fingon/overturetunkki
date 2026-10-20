@@ -198,9 +198,13 @@ func (service *Service) Catalog(ctx context.Context) (Catalog, error) {
 	for resolution := options.MinTileResolution; resolution <= 15; resolution++ {
 		resolutions = append(resolutions, resolution)
 	}
-	zooms := make([]int, tilequery.MaxZoom+1)
+	minimumZoom, err := tilequery.MinimumXYZZoom(options.MinTileResolution)
+	if err != nil {
+		return Catalog{}, err
+	}
+	zooms := make([]int, tilequery.MaxZoom-minimumZoom+1)
 	for zoom := range zooms {
-		zooms[zoom] = zoom
+		zooms[zoom] = minimumZoom + zoom
 	}
 	return Catalog{
 		Release: snapshot.Release, CatalogVersion: snapshot.CatalogVersion,
@@ -221,6 +225,7 @@ var (
 	ErrCacheInUse          = cache.ErrCacheInUse
 	ErrTooManyRows         = worker.ErrTooManyRows
 	ErrOutputTooLarge      = worker.ErrOutputTooLarge
+	ErrZoomTooCoarse       = worker.ErrZoomTooCoarse
 	ErrResolutionTooCoarse = worker.ErrResolutionTooCoarse
 	ErrInvalidCell         = worker.ErrInvalidCell
 	ErrTileTimeout         = worker.ErrTileTimeout
@@ -240,4 +245,5 @@ type (
 	OutputTooLargeError = worker.OutputTooLargeError
 	// ResolutionTooCoarseError reports an H3 resolution below the configured minimum.
 	ResolutionTooCoarseError = worker.ResolutionTooCoarseError
+	ZoomTooCoarseError       = worker.ZoomTooCoarseError
 )

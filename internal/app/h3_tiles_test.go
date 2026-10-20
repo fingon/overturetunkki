@@ -189,3 +189,16 @@ func TestTemporaryReaderCloseIsIdempotent(t *testing.T) {
 	assert.NilError(t, reader.Close())
 	assert.Assert(t, ctx.Err() != nil)
 }
+
+func TestCoarseCachedSquareOnlyAvailableAsInternalSource(t *testing.T) {
+	provider := newTestTileProvider(t)
+	generation, _ := testH3Generation(t)
+	square := tilequery.Square{}
+	seedSquare(t, provider, generation, square)
+	query := tilequery.Query{Square: &square}
+	_, err := provider.Get(t.Context(), generation, query)
+	assert.Assert(t, errors.Is(err, worker.ErrZoomTooCoarse))
+	tile, err := provider.get(t.Context(), generation, query, true)
+	assert.NilError(t, err)
+	assert.NilError(t, tile.Reader.Close())
+}

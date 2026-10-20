@@ -141,6 +141,8 @@ func (response ErrorResponse) refinementDiagnostic() string {
 		return "maximum XYZ zoom is terminal; omit this tile or use a deployment with different limits"
 	case !*response.CanRefine:
 		return "resolution 15 is terminal; omit this tile or use a deployment with different limits"
+	case response.SuggestedZoom != nil && response.Zoom != nil && *response.SuggestedZoom > *response.Zoom+1:
+		return fmt.Sprintf("request all descendants covering this square at zoom %d", *response.SuggestedZoom)
 	case response.SuggestedZoom != nil:
 		return fmt.Sprintf("request all four children at zoom %d", *response.SuggestedZoom)
 	case response.SuggestedResolution != nil:

@@ -52,7 +52,7 @@ type Config struct {
 	CatalogStaleGrace    time.Duration `default:"24h" env:"OVERTURE_CATALOG_STALE_GRACE" help:"Additional time to serve validated catalog during transient upstream failures." name:"catalog-stale-grace"`
 	CatalogTimeout       time.Duration `default:"10s" env:"OVERTURE_CATALOG_TIMEOUT" help:"Complete catalog freshness-check deadline." name:"catalog-timeout"`
 	Fields               []string      `default:"id,geometry,names,basic_category" env:"OVERTURE_FIELDS" help:"Comma-separated top-level output fields." name:"fields" sep:","`
-	MinTileResolution    int           `default:"2" env:"OVERTURE_MIN_TILE_RESOLUTION" help:"Minimum H3 tile resolution (0-15); coarser requests are rejected without building." name:"min-tile-resolution"`
+	MinTileResolution    int           `default:"2" env:"OVERTURE_MIN_TILE_RESOLUTION" help:"Minimum H3 tile resolution (0-15), also deriving the minimum XYZ zoom by closest equatorial area; 0 allows all; coarser requests are rejected without building." name:"min-tile-resolution"`
 	MaxTileBytes         int64         `default:"8388608" env:"OVERTURE_MAX_TILE_BYTES" help:"Maximum complete zstd Parquet tile size in bytes." name:"max-tile-bytes"`
 	MaxTileRows          int64         `default:"100000" env:"OVERTURE_MAX_TILE_ROWS" help:"Additional early tile row rejection threshold." name:"max-tile-rows"`
 	CacheDir             string        `default:"/var/cache/overture" env:"OVERTURE_CACHE_DIR" help:"Exclusive writable cache root." name:"cache-dir"`

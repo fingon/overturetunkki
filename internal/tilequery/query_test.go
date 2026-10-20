@@ -2,8 +2,10 @@ package tilequery
 
 import (
 	"math"
+	"strconv"
 	"testing"
 
+	"github.com/uber/h3-go/v4"
 	"gotest.tools/v3/assert"
 )
 
@@ -99,5 +101,35 @@ func TestCoverIsCompleteAndBounded(t *testing.T) {
 				assert.Assert(t, !fits)
 			}
 		})
+	}
+}
+
+func TestMinimumXYZZoom(t *testing.T) {
+	for resolution := range h3.MaxResolution + 1 {
+		t.Run(strconv.Itoa(resolution), func(t *testing.T) {
+			zoom, err := MinimumXYZZoom(resolution)
+			assert.NilError(t, err)
+			assert.Assert(t, zoom >= 0 && zoom <= MaxZoom)
+			switch resolution {
+			case 0:
+				assert.Equal(t, zoom, 0)
+			case 2:
+				assert.Equal(t, zoom, 7)
+			case h3.MaxResolution:
+				assert.Equal(t, zoom, MaxZoom)
+			}
+			if resolution == 0 || zoom == MaxZoom {
+				return
+			}
+			areaM2, err := h3.HexagonAreaAvgM2(resolution)
+			assert.NilError(t, err)
+			const circumferenceM = 2 * math.Pi * 6378137
+			tileAreaM2 := circumferenceM * circumferenceM / math.Exp2(float64(2*zoom))
+			assert.Assert(t, tileAreaM2/areaM2 >= 0.5 && tileAreaM2/areaM2 <= 2)
+		})
+	}
+	for _, resolution := range []int{-1, h3.MaxResolution + 1} {
+		_, err := MinimumXYZZoom(resolution)
+		assert.Assert(t, err != nil)
 	}
 }

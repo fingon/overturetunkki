@@ -71,6 +71,8 @@ func TestPublicCatalogAndLifecycle(t *testing.T) {
 	catalog, err := service.Catalog(t.Context())
 	assert.NilError(t, err)
 	assert.Equal(t, catalog.Release, "2026-09-23.1")
+	assert.Equal(t, catalog.SupportedXYZZooms[0], 7)
+	assert.Equal(t, catalog.SupportedXYZZooms[len(catalog.SupportedXYZZooms)-1], 22)
 	assert.DeepEqual(t, catalog.Fields, []string{"id", "geometry", "names"})
 	catalog.Fields[0] = "mutated"
 	again, err := service.Catalog(t.Context())
@@ -81,6 +83,12 @@ func TestPublicCatalogAndLifecycle(t *testing.T) {
 	_, err = overture.Open(t.Context(), lockedOptions)
 	assert.Assert(t, errors.Is(err, overture.ErrCacheInUse))
 	_, err = service.Get(t.Context(), overture.TileRequest{Square: &overture.Square{}, CatalogVersion: "stale"})
+	assert.Assert(t, errors.Is(err, overture.ErrZoomTooCoarse))
+	var coarse *overture.ZoomTooCoarseError
+	assert.Assert(t, errors.As(err, &coarse))
+	assert.Equal(t, coarse.ActualZoom, 0)
+	assert.Equal(t, coarse.MinZoom, 7)
+	_, err = service.Get(t.Context(), overture.TileRequest{Square: &overture.Square{Z: 7}, CatalogVersion: "stale"})
 	var changed *overture.CatalogChangedError
 	assert.Assert(t, errors.As(err, &changed))
 	assert.Equal(t, changed.CurrentVersion, catalog.CatalogVersion)
@@ -138,6 +146,7 @@ func tileFixtureOptions(t *testing.T) overture.Options {
 	assert.NilError(t, os.WriteFile(certificatePath, certificate, 0o600))
 
 	options := fixtureOptions(t, assets.URL)
+	options.MinTileResolution = 0
 	options.AssetCAFile = certificatePath
 	return options
 }

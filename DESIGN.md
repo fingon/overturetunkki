@@ -81,8 +81,8 @@ selects a PEM trust bundle for DuckDB asset reads with verification enabled.
 fields, serving limits, supported H3 resolutions/XYZ zooms, and attribution.
 `Service.Get(ctx, TileRequest)` selects exactly one canonical H3 `Cell` or XYZ
 `Square`. An omitted catalog version selects the current validated version;
-an explicit version must match. Requests validate coordinates and minimum H3
-resolution before upstream checks. Freshness and generation checks run before
+an explicit version must match. Requests validate coordinates, minimum H3
+resolution, and derived minimum XYZ zoom before upstream checks. Freshness and generation checks run before
 building and before publishing the result to its caller. Typed limit and
 catalog-change errors and public sentinels support `errors.As`/`errors.Is`.
 
@@ -221,7 +221,7 @@ Reject a missing version or invalid query with `400`. XYZ coordinates are
 canonical unsigned decimal integers with zoom 0–22 and X/Y below `2^zoom`.
 Y increases southward. Invalid XYZ queries are rejected before catalog checks. Validate a canonical
 lowercase hexadecimal H3 cell index, cell mode, and resolution 0 through 15;
-resolution comes from the index. Requests below `min_tile_resolution` return
+resolution comes from the index. H3 requests below `min_tile_resolution` and XYZ requests below its derived minimum zoom return
 `422` before any freshness check, version comparison, cache lookup, or job
 admission. Other requests revalidate freshness and reject a different version
 with `409` before looking up the tile.
@@ -241,7 +241,7 @@ Errors are JSON with `code`, `message`, `retryable`, and known catalog context:
 | --- | --- | --- |
 | 400 | `invalid_request` | Correct parameters. |
 | 409 | `catalog_changed` | Refresh catalog and discard old tiles. |
-| 422 | `tile_too_large` | Request finer H3 cells or four square children at the suggested XYZ zoom. |
+| 422 | `tile_too_large` | Request finer H3 cells or all covering square descendants at the suggested XYZ zoom. |
 | 503 | `catalog_unavailable`, `capacity_unavailable`, `upstream_unavailable`, `server_shutting_down` | Retry with backoff; honor `Retry-After`. |
 | 504 | `tile_timeout` | Retry later; this does not prove the tile is oversized. |
 | 500 | `internal_error` | Report request ID; server logs the cause. |
@@ -268,6 +268,17 @@ variation. Configure it with `--min-tile-resolution` or
 `OVERTURE_MIN_TILE_RESOLUTION` (0–15). Resolutions below the minimum always
 return `422 tile_too_large`, even if cached; the catalog advertises only the
 allowed resolutions. Resolution rejections need no negative-cache entry.
+
+The same setting derives the minimum XYZ zoom from average H3 hexagon area
+in square meters: `round(log2((2 * pi * 6378137)^2 / area_m2) / 2)`.
+This selects the closest equatorial XYZ tile area on a logarithmic scale.
+Clamp to zoom 0–22; explicitly map H3 minimum 0 to XYZ minimum 0 to allow all.
+The default H3 minimum 2 maps to XYZ minimum 7. This global cutoff does not
+vary by latitude. Coarser direct XYZ requests return `422 tile_too_large`
+before freshness, version, cache, or admission work, even if cached. Internal
+H3 source squares and cached ancestor reuse remain available below the cutoff.
+`ZoomTooCoarseError` and `ErrZoomTooCoarse` expose this rejection to Go callers.
+
 This is advice, not a guarantee the next resolution fits. At resolution 15,
 return `can_refine: false` with no suggested resolution; clients must omit the
 tile or use a deployment with different limits/fields. Never return truncated
@@ -510,7 +521,8 @@ path.
 Cache key: `(catalog_version, projection_id, query identity, size_policy_id)`.
 The persisted identity field is `tile`, with a canonical `xyz/z/x/y` value or canonical H3 index for a retained oversized H3 file.
 Old sidecars using `cell` fail reconciliation and are removed with their files.
-The size policy hashes byte/row limits, the minimum resolution, and selected
+The size policy hashes byte/row limits, the minimum resolution, derived minimum
+XYZ zoom, mapping version, and selected
 fields and an XYZ cache revision, preventing reuse across different admission
 and rejection policies. Compression and writer revisions are part of projection identity.
 Files live under hash-derived paths, never raw request paths.
@@ -616,7 +628,10 @@ source square is recorded only under that square; it does not prove that the
 H3 output itself exceeds the limit.
 
 Square errors contain `zoom`, `x`, `y`, `suggested_zoom`, `can_refine`, and the
-failed row/byte limit. Refinement requests all four children. Zoom 22 is terminal.
+failed limit (`rows`, `compressed_bytes`, or `zoom`). Zoom rejections suggest
+the derived minimum; size rejections suggest the next zoom. Refinement requests
+all descendants covering the original square at the suggested zoom, or all four
+children when advancing one zoom. Zoom 22 is terminal for size rejections.
 H3 errors preserve the H3 fields and resolution-15 terminal behavior.
 
 Cache `tile_too_large` decisions in a separate bounded in-memory LRU with a short
@@ -653,7 +668,7 @@ These defaults are starting points to validate with representative POIs.
 | `--fields` | `id,geometry,names,basic_category` | Output projection. |
 | `--max-tile-bytes` | `8388608` | Maximum complete zstd Parquet size, 8 MiB. |
 | `--max-tile-rows` | `100000` | Additional early rejection threshold. |
-| `--min-tile-resolution` | `2` | Coarser H3 requests always return `tile_too_large`; valid range 0–15. |
+| `--min-tile-resolution` | `2` | Sets the H3 minimum and derives the XYZ minimum (default zoom 7); coarser requests return `tile_too_large`; valid range 0–15, with 0 allowing all. |
 | `--cache-dir` | `/var/cache/overture` | Exclusive writable cache root. |
 | `--cache-max-bytes` | `10737418240` | Complete files plus reservations, 10 GiB. |
 | `--cache-max-entries` | `100000` | Bounds file/metadata count. |

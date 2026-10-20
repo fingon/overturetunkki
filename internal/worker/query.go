@@ -30,6 +30,7 @@ const (
 var (
 	ErrInvalidCell         = errors.New("invalid H3 cell")
 	ErrInvalidProjection   = errors.New("invalid source projection")
+	ErrZoomTooCoarse       = errors.New("tile zoom is below the minimum")
 	ErrResolutionTooCoarse = errors.New("tile resolution is below the minimum")
 	ErrTooManyRows         = errors.New("candidate rows exceed row limit")
 )
@@ -46,6 +47,17 @@ func (err *ResolutionTooCoarseError) Error() string {
 func (*ResolutionTooCoarseError) Unwrap() error {
 	return ErrResolutionTooCoarse
 }
+
+type ZoomTooCoarseError struct {
+	ActualZoom int
+	MinZoom    int
+}
+
+func (err *ZoomTooCoarseError) Error() string {
+	return fmt.Sprintf("tile zoom %d is below minimum zoom %d", err.ActualZoom, err.MinZoom)
+}
+
+func (*ZoomTooCoarseError) Unwrap() error { return ErrZoomTooCoarse }
 
 type TileRequest = tilequery.Query
 
@@ -591,4 +603,25 @@ func isIdentifierPart(value byte) bool {
 
 func quoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func ValidateMinimum(query tilequery.Query, minResolution int) error {
+	if query.Square != nil {
+		minimum, err := tilequery.MinimumXYZZoom(minResolution)
+		if err != nil {
+			return err
+		}
+		if query.Square.Z < minimum {
+			return &ZoomTooCoarseError{ActualZoom: query.Square.Z, MinZoom: minimum}
+		}
+		return nil
+	}
+	cell, err := ParseCanonicalCell(query.Cell)
+	if err != nil {
+		return err
+	}
+	if cell.Resolution() < minResolution {
+		return &ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: minResolution}
+	}
+	return nil
 }

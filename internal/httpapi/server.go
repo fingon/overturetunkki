@@ -35,6 +35,7 @@ const (
 	retryAfterSeconds                   = "1"
 	defaultTileConcurrency              = 2
 	defaultWriteTimeout                 = 30 * time.Second
+	tileTooLargeCode                    = "tile_too_large"
 	tileDigestPrefix                    = "sha256:"
 	capacityUnavailableCode             = "capacity_unavailable"
 	capacityUnavailableMessage          = "tile capacity is unavailable"
@@ -93,6 +94,7 @@ type Server struct {
 	provider        TileProvider
 	fields          []string
 	options         Options
+	minXYZZoom      int
 	requests        atomic.Uint64
 	catalogRequests atomic.Uint64
 	tileRequests    atomic.Uint64
@@ -176,6 +178,10 @@ func New(options Options) (*Server, error) {
 	if options.WriteTimeout == 0 {
 		options.WriteTimeout = defaultWriteTimeout
 	}
+	minXYZZoom, err := tilequery.MinimumXYZZoom(options.MinTileResolution)
+	if err != nil {
+		return nil, err
+	}
 	fields := append([]string(nil), options.Fields...)
 	attribution := append([]string(nil), options.AttributionURL...)
 	options.Fields = fields
@@ -185,6 +191,7 @@ func New(options Options) (*Server, error) {
 		provider:       options.Provider,
 		fields:         fields,
 		options:        options,
+		minXYZZoom:     minXYZZoom,
 		tileAdmissions: make(map[tileAdmissionKey]int),
 	}, nil
 }
@@ -373,7 +380,7 @@ func (server *Server) serveCatalog(responseWriter http.ResponseWriter, request *
 		MaxTileBytes:           server.options.MaxTileBytes,
 		MaxTileRows:            server.options.MaxTileRows,
 		SupportedH3Resolutions: supportedH3Resolutions(server.options.MinTileResolution),
-		SupportedXYZZooms:      supportedXYZZooms(),
+		SupportedXYZZooms:      supportedXYZZooms(server.minXYZZoom),
 		Attribution:            append([]string(nil), server.options.AttributionURL...),
 	})
 }
@@ -388,13 +395,12 @@ func (server *Server) serveTile(responseWriter http.ResponseWriter, request *htt
 		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: err.Error()})
 		return
 	}
-	query, cell, err := parseTileQuery(strings.TrimPrefix(request.URL.Path, "/v1/tiles/places/"))
+	query, err := parseTileQuery(strings.TrimPrefix(request.URL.Path, "/v1/tiles/places/"))
 	if err != nil {
 		writeError(responseWriter, http.StatusBadRequest, errorResponse{Code: invalidRequestCode, Message: err.Error()})
 		return
 	}
-	if query.Square == nil && cell.Resolution() < server.options.MinTileResolution {
-		err := &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: server.options.MinTileResolution}
+	if err := worker.ValidateMinimum(query, server.options.MinTileResolution); err != nil {
 		status, response := classifyQueryError(err, query, server.options.MaxTileBytes)
 		writeError(responseWriter, status, response)
 		return
@@ -644,13 +650,15 @@ func requiredQueryValue(request *http.Request, name string) (string, error) {
 	return values[0], nil
 }
 
-func parseTileQuery(value string) (tilequery.Query, h3.Cell, error) {
+func parseTileQuery(value string) (tilequery.Query, error) {
 	if strings.HasPrefix(value, tilequery.XYZPrefix) {
 		square, err := tilequery.ParseSquare(value)
-		return tilequery.Query{Square: &square}, 0, err
+		return tilequery.Query{Square: &square}, err
 	}
-	cell, err := worker.ParseCanonicalCell(value)
-	return tilequery.Query{Cell: value}, cell, err
+	if _, err := worker.ParseCanonicalCell(value); err != nil {
+		return tilequery.Query{}, err
+	}
+	return tilequery.Query{Cell: value}, nil
 }
 
 func classifyQueryError(err error, query tilequery.Query, maxTileBytes int64) (int, errorResponse) {
@@ -660,31 +668,19 @@ func classifyQueryError(err error, query tilequery.Query, maxTileBytes int64) (i
 		return status, response
 	}
 	if query.Square != nil {
-		square := *query.Square
-		response.Cell = ""
-		response.Resolution = nil
-		response.SuggestedResolution = nil
-		response.Zoom, response.X, response.Y = &square.Z, &square.X, &square.Y
-		canRefine := square.Z < tilequery.MaxZoom
-		response.CanRefine = &canRefine
-		response.Guidance = "request all four children at the next zoom level"
-		if canRefine {
-			nextZoom := square.Z + 1
-			response.SuggestedZoom = &nextZoom
-		} else {
-			response.Guidance = "maximum XYZ zoom reached; use a deployment with different limits"
-		}
+		response = squareErrorResponse(err, *query.Square, response)
 	}
+
 	if sourceErr, ok := errors.AsType[*worker.SourceSquareError](err); ok {
 		response.Message = sourceErr.Error()
 	}
 	return status, response
 }
 
-func supportedXYZZooms() []int {
-	zooms := make([]int, tilequery.MaxZoom+1)
+func supportedXYZZooms(minimum int) []int {
+	zooms := make([]int, tilequery.MaxZoom-minimum+1)
 	for index := range zooms {
-		zooms[index] = index
+		zooms[index] = minimum + index
 	}
 	return zooms
 }
@@ -697,6 +693,8 @@ func classifyTileError(err error, cell h3.Cell, maxTileBytes int64) (int, errorR
 		return http.StatusUnprocessableEntity, response
 	}
 	switch {
+	case errors.Is(err, worker.ErrZoomTooCoarse):
+		return http.StatusUnprocessableEntity, errorResponse{Code: tileTooLargeCode, Message: err.Error()}
 	case errors.Is(err, worker.ErrOutputTooLarge):
 		return http.StatusUnprocessableEntity, sizeErrorResponse(cell, maxTileBytes, "compressed_bytes", "tile exceeds the compressed byte limit")
 	case errors.Is(err, worker.ErrTooManyRows):
@@ -716,7 +714,7 @@ func sizeErrorResponse(cell h3.Cell, maxTileBytes int64, failedLimit, message st
 	resolution := cell.Resolution()
 	canRefine := resolution < h3.MaxResolution
 	response := errorResponse{
-		Code:         "tile_too_large",
+		Code:         tileTooLargeCode,
 		Message:      message,
 		Cell:         cell.String(),
 		Resolution:   &resolution,
@@ -762,4 +760,28 @@ func writeError(responseWriter http.ResponseWriter, status int, response errorRe
 		responseWriter.Header().Set("Retry-After", retryAfterSeconds)
 	}
 	writeJSON(responseWriter, status, response)
+}
+
+func squareErrorResponse(err error, square tilequery.Square, response errorResponse) errorResponse {
+	response.Cell = ""
+	response.Resolution = nil
+	response.SuggestedResolution = nil
+	response.Zoom, response.X, response.Y = &square.Z, &square.X, &square.Y
+	canRefine := square.Z < tilequery.MaxZoom
+	response.CanRefine = &canRefine
+	if !canRefine {
+		response.Guidance = "maximum XYZ zoom reached; use a deployment with different limits"
+		return response
+	}
+	nextZoom := square.Z + 1
+	if tooCoarse, ok := errors.AsType[*worker.ZoomTooCoarseError](err); ok {
+		nextZoom = tooCoarse.MinZoom
+		response.FailedLimit = "zoom"
+	}
+	response.SuggestedZoom = &nextZoom
+	response.Guidance = "request all four children at the next zoom level"
+	if nextZoom > square.Z+1 {
+		response.Guidance = "request all descendants covering this square at the suggested zoom"
+	}
+	return response
 }

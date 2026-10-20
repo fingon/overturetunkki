@@ -225,8 +225,13 @@ in-range POIs.
 `OVERTURE_MIN_TILE_RESOLUTION` (or `--min-tile-resolution`) defaults to `2`,
 roughly 300–365 km across using average H3 edge lengths. Requests at lower
 resolutions immediately return `422 tile_too_large` without checking the catalog
-or building a tile. The catalog advertises allowed resolutions. Set the minimum
-to `0` to allow all H3 resolutions, or raise it to restrict requests further.
+or building a tile. The same setting derives a minimum XYZ zoom by matching
+average H3 cell area to the closest equatorial XYZ tile area on a logarithmic
+scale. The default H3 minimum `2` maps to XYZ zoom `7`; coarser XYZ requests
+also immediately return `422 tile_too_large`. The catalog advertises allowed
+resolutions and zooms. Set the minimum to `0` to allow all H3 resolutions and
+XYZ zooms, or raise it to restrict requests further. The derived XYZ minimum
+is capped at zoom `22` and does not vary by latitude.
 
 The catalog response includes Overture's attribution URL
 (`https://overturemaps.org`) along with the release, catalog version,
@@ -265,12 +270,14 @@ refinement. Exit codes are:
 | `1` | Transport, integrity, filesystem, timeout, or unexpected server failure. |
 | `2` | Invalid CLI arguments or HTTP 400. |
 | `3` | Catalog changed (HTTP 409); refresh and invoke again with the current version. |
-| `4` | Tile too large (HTTP 422); request finer H3 cells or all four XYZ children at the suggested zoom. |
+| `4` | Tile too large (HTTP 422); request finer H3 cells or all covering XYZ descendants at the suggested zoom. |
 | `5` | Temporary service failure (HTTP 503/504); retry later. |
 
 For a size rejection, cover the viewport or original cell with every finer
 cell intersecting its footprint and deduplicate POIs by ID; logical children
-alone do not guarantee coverage at boundaries. For a square rejection, request its four children at the next zoom. At H3
+alone do not guarantee coverage at boundaries. For a square rejection, request
+all descendants covering it at the suggested zoom (four children when advancing
+one zoom). At H3
 resolution 15 or XYZ zoom 22, refinement is unavailable; omit the tile or use a
 deployment with different limits.
 

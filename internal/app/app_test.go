@@ -86,7 +86,21 @@ func TestTileProviderRejectsCoarseTilesBeforeCache(t *testing.T) {
 	}
 	cfg, err := config.Parse(nil)
 	assert.NilError(t, err)
-	original := sizePolicyID(cfg)
+	original := sizePolicyID(cfg, 7)
+	assert.Assert(t, sizePolicyID(cfg, 8) != original)
 	cfg.MinTileResolution++
-	assert.Assert(t, sizePolicyID(cfg) != original)
+	assert.Assert(t, sizePolicyID(cfg, 7) != original)
+}
+
+func TestTileProviderRejectsCoarseXYZBeforeCache(t *testing.T) {
+	provider := &tileProvider{minResolution: config.DefaultMinTileResolution}
+	query := tilequery.Query{Square: &tilequery.Square{}}
+	_, err := provider.Get(t.Context(), catalog.Generation{}, query)
+	assert.Assert(t, errors.Is(err, worker.ErrZoomTooCoarse))
+	tooCoarse, ok := errors.AsType[*worker.ZoomTooCoarseError](err)
+	assert.Assert(t, ok)
+	assert.Equal(t, tooCoarse.MinZoom, 7)
+	_, err = provider.get(t.Context(), catalog.Generation{}, query, true)
+	assert.Assert(t, !errors.Is(err, worker.ErrZoomTooCoarse))
+	assert.ErrorContains(t, err, "catalog generation context is nil")
 }

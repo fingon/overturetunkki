@@ -78,6 +78,11 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 	if perWorkerScratchBytes <= cfg.MaxTileBytes {
 		return nil, errors.New("create tile provider: per-worker scratch capacity must exceed max-tile-bytes")
 	}
+	minimumZoom, err := tilequery.MinimumXYZZoom(cfg.MinTileResolution)
+	if err != nil {
+		return nil, err
+	}
+
 	scheduler, err := cache.NewScheduler(tileCache, cache.SchedulerOptions{Workers: workerCount, QueueCapacity: queueCapacity, Timeout: cfg.TileTimeout})
 	if err != nil {
 		return nil, err
@@ -103,7 +108,7 @@ func newTileProvider(cfg config.Config, tileCache *cache.Cache, negative *cache.
 		maxBytes:           cfg.MaxTileBytes,
 		minResolution:      cfg.MinTileResolution,
 		settings:           settings,
-		policyID:           sizePolicyID(cfg),
+		policyID:           sizePolicyID(cfg, minimumZoom),
 	}
 	return provider, nil
 }
@@ -122,13 +127,9 @@ func (provider *tileProvider) get(ctx context.Context, generation catalog.Genera
 	if err := query.Validate(); err != nil {
 		return httpapi.Tile{}, err
 	}
-	if query.Square == nil {
-		cell, err := worker.ParseCanonicalCell(query.Cell)
-		if err != nil {
+	if !source {
+		if err := worker.ValidateMinimum(query, provider.minResolution); err != nil {
 			return httpapi.Tile{}, err
-		}
-		if cell.Resolution() < provider.minResolution {
-			return httpapi.Tile{}, &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: provider.minResolution}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -556,8 +557,8 @@ func configureTileConnectionDirectory(ctx context.Context, connection *sql.Conn,
 	return nil
 }
 
-func sizePolicyID(cfg config.Config) string {
-	input := fmt.Sprintf("xyz-v1;bytes=%d;rows=%d;min_resolution=%d;fields=%s", cfg.MaxTileBytes, cfg.MaxTileRows, cfg.MinTileResolution, strings.Join(cfg.Fields, ","))
+func sizePolicyID(cfg config.Config, minimumZoom int) string {
+	input := fmt.Sprintf("xyz-v2;bytes=%d;rows=%d;min_resolution=%d;min_zoom=%d;fields=%s", cfg.MaxTileBytes, cfg.MaxTileRows, cfg.MinTileResolution, minimumZoom, strings.Join(cfg.Fields, ","))
 	digest := sha256.Sum256([]byte(input))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }

@@ -38,6 +38,7 @@ func TestCompletedOversizedTilesAreRetained(t *testing.T) {
 	for _, kind := range []string{"xyz", "h3"} {
 		t.Run(kind, func(t *testing.T) {
 			provider := newTestTileProvider(t)
+			provider.minResolution = 0
 			provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 			generation, h3Query := testH3Generation(t)
 			seedSquare(t, provider, generation, tilequery.Square{})
@@ -82,6 +83,7 @@ func TestOversizedTileThatCannotFitCacheIsDiscarded(t *testing.T) {
 		t.Skip("make test supplies pinned extensions")
 	}
 	provider := newTestTileProvider(t)
+	provider.minResolution = 0
 	provider.extensionDirectory = os.Getenv(duckdbExtensionDirectoryEnv)
 	generation, _ := testH3Generation(t)
 	query := tilequery.Query{Square: &tilequery.Square{Z: 1, X: 1, Y: 0}}

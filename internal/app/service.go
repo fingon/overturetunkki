@@ -180,15 +180,10 @@ func (service *Service) Get(ctx context.Context, query tilequery.Query, version 
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	if query.Square == nil {
-		cell, err := worker.ParseCanonicalCell(query.Cell)
-		if err != nil {
-			return nil, err
-		}
-		if cell.Resolution() < service.config.MinTileResolution {
-			return nil, &worker.ResolutionTooCoarseError{ActualResolution: cell.Resolution(), MinResolution: service.config.MinTileResolution}
-		}
+	if err := worker.ValidateMinimum(query, service.config.MinTileResolution); err != nil {
+		return nil, err
 	}
+
 	snapshot, err := service.observer.Refresh(ctx)
 	if err != nil {
 		return nil, err

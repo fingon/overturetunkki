@@ -4,11 +4,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/fingon/overturetunkki/internal/tilequery"
@@ -41,7 +45,7 @@ func TestXYZDownloadsAndConditionalRequests(t *testing.T) {
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/catalog", nil))
 	var catalog catalogResponse
 	assert.NilError(t, json.Unmarshal(response.Body.Bytes(), &catalog))
-	assert.Equal(t, len(catalog.SupportedXYZZooms), tilequery.MaxZoom+1)
+	assert.Equal(t, len(catalog.SupportedXYZZooms), tilequery.MaxZoom-server.minXYZZoom+1)
 }
 
 func TestXYZValidationAndRefinementErrors(t *testing.T) {
@@ -55,7 +59,7 @@ func TestXYZValidationAndRefinementErrors(t *testing.T) {
 		{"xyz/1/2/0", http.StatusBadRequest, 0, false},
 		{"xyz/01/0/0", http.StatusBadRequest, 0, false},
 		{"xyz/1/0", http.StatusBadRequest, 0, false},
-		{"xyz/0/0/0", http.StatusUnprocessableEntity, 0, true},
+		{"xyz/7/0/0", http.StatusUnprocessableEntity, 7, true},
 		{"xyz/22/0/0", http.StatusUnprocessableEntity, 22, false},
 	} {
 		t.Run(test.path, func(t *testing.T) {
@@ -94,4 +98,54 @@ func TestH3SourceSizeErrorPreservesRequestedCell(t *testing.T) {
 	assert.Equal(t, response.FailedLimit, "rows")
 	assert.Assert(t, response.Zoom == nil)
 	assert.Assert(t, len(response.Message) > len(square.String()))
+}
+
+func TestXYZMinimumBeforeCatalogAndProvider(t *testing.T) {
+	for _, minResolution := range []int{0, 2, 4, 15} {
+		t.Run(strconv.Itoa(minResolution), func(t *testing.T) {
+			observer := &testObserver{snapshot: testSnapshot(), refreshErr: errors.New("catalog unavailable")}
+			provider := &testProvider{err: worker.ErrTooManyRows}
+			options := testOptions(observer, provider)
+			options.MinTileResolution = minResolution
+			server, err := New(options)
+			assert.NilError(t, err)
+			minimum, err := tilequery.MinimumXYZZoom(minResolution)
+			assert.NilError(t, err)
+			for zoom := range minimum {
+				endpoint := fmt.Sprintf("/v1/tiles/places/xyz/%d/0/0?catalog_version=stale", zoom)
+				response := httptest.NewRecorder()
+				server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, endpoint, nil))
+				assert.Equal(t, response.Code, http.StatusUnprocessableEntity)
+				var result errorResponse
+				assert.NilError(t, json.Unmarshal(response.Body.Bytes(), &result))
+				assert.Equal(t, result.Code, tileTooLargeCode)
+				assert.Equal(t, result.FailedLimit, "zoom")
+				assert.Equal(t, *result.Zoom, zoom)
+				assert.Equal(t, *result.X, 0)
+				assert.Equal(t, *result.Y, 0)
+				assert.Equal(t, *result.SuggestedZoom, minimum)
+				assert.Assert(t, *result.CanRefine)
+				assert.Assert(t, result.Resolution == nil && result.SuggestedResolution == nil)
+				if minimum > zoom+1 {
+					assert.Assert(t, strings.Contains(result.Guidance, "descendants"))
+				}
+			}
+			assert.Equal(t, observer.refreshes, 0)
+			assert.Equal(t, provider.calls, 0)
+			observer.refreshErr = nil
+			endpoint := fmt.Sprintf("/v1/tiles/places/xyz/%d/0/0?catalog_version=%s", minimum, url.QueryEscape(observer.snapshot.CatalogVersion))
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, endpoint, nil))
+			assert.Equal(t, provider.calls, 1)
+			var result errorResponse
+			assert.NilError(t, json.Unmarshal(response.Body.Bytes(), &result))
+			assert.Equal(t, result.FailedLimit, "rows")
+			response = httptest.NewRecorder()
+			server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/catalog", nil))
+			var catalog catalogResponse
+			assert.NilError(t, json.Unmarshal(response.Body.Bytes(), &catalog))
+			assert.Equal(t, catalog.SupportedXYZZooms[0], minimum)
+			assert.Equal(t, catalog.SupportedXYZZooms[len(catalog.SupportedXYZZooms)-1], tilequery.MaxZoom)
+		})
+	}
 }
