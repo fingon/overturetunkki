@@ -604,7 +604,9 @@ a schema-only Parquet query against one validated source asset, without
 scanning POI rows; STAC column types may be incomplete.
 
 Pin completed source files while the worker applies exact H3 membership and
-deduplicates POI IDs before final row/byte checks. Sort exported rows by ID for
+deduplicates POI IDs with `DISTINCT ON (id)` before final row/byte checks. Avoid
+window-based deduplication: DuckDB 1.5.6 can assert in Top-N window elimination
+while optimizing the membership predicates. Sort exported rows by ID for
 stable repeated ETags. Pass absolute local source paths to the in-process build;
 H3 compositions use at most four files. Square requests without local sources
 retain upstream selection. Geometry, projection, COPY, metadata, and validation

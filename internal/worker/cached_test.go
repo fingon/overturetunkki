@@ -25,11 +25,13 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 		t.Skip("requires bundled spatial extension; make test on Linux supplies it")
 	}
 	for _, test := range []struct {
-		name  string
-		point h3.LatLng
-		empty bool
+		name             string
+		point            h3.LatLng
+		empty            bool
+		duplicateSources bool
 	}{
 		{name: "ordinary", point: h3.LatLng{Lat: 37.775938728915946, Lng: -122.41795063018799}},
+		{name: "overlapping sources", point: h3.LatLng{Lat: 37.775938728915946, Lng: -122.41795063018799}, duplicateSources: true},
 		{name: "antimeridian", point: h3.LatLng{Lat: 0, Lng: 179.9999}},
 		{name: "empty", point: h3.LatLng{Lat: 60.17, Lng: 24.94}, empty: true},
 	} {
@@ -84,10 +86,26 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 				assert.NilError(t, err)
 				paths = append(paths, sourcePath)
 			}
+			if test.duplicateSources {
+				metadata, metadataErr := candidateMetadata(plan)
+				assert.NilError(t, metadataErr)
+				paths = nil
+				for index := range 2 {
+					overlapPath := filepath.Join(directory, fmt.Sprintf("overlap-%d.parquet", index))
+					copySQL, copyErr := geoparquet.CopySQL("SELECT "+candidateProjectionSQL(plan.Columns)+" FROM points", overlapPath, metadata)
+					assert.NilError(t, copyErr)
+					_, err = connection.ExecContext(t.Context(), copySQL)
+					assert.NilError(t, err)
+					paths = append(paths, overlapPath)
+				}
+			}
+			var expectedRows int64
+			err = connection.QueryRowContext(t.Context(), "SELECT count(*) FROM points WHERE "+plan.membershipSQL(), plan.membershipArgs()...).Scan(&expectedRows)
+			assert.NilError(t, err)
 			outputPath := filepath.Join(directory, "derived.parquet")
 			request := RuntimeTileRequest{
 				Conn: connection, Plan: plan, Snapshot: snapshot, SourcePaths: paths,
-				MaxRows: 10000, OutputPath: outputPath,
+				MaxRows: max(1, expectedRows), OutputPath: outputPath,
 				Settings: RuntimeSettings{MemoryBytes: 64 << 20, Threads: 1, ScratchDirectory: t.TempDir(), ScratchMaxBytes: 1 << 20, MaxOutputBytes: 1 << 20, TileTimeout: time.Second * 10},
 			}
 			result, err := BuildTileWithSettings(t.Context(), request)
@@ -99,6 +117,7 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 			assert.NilError(t, err)
 			assert.Equal(t, validation.Digest, result.Digest)
 			assert.Equal(t, validation.RowCount, result.RowCount)
+			assert.Equal(t, result.RowCount, expectedRows)
 			var differences int64
 			err = connection.QueryRowContext(t.Context(), `
  WITH expected AS (
@@ -124,7 +143,7 @@ func TestCachedTileMatchesDirectMembership(t *testing.T) {
 			var outsideParent int64
 			err = connection.QueryRowContext(t.Context(), `SELECT count(*) FROM points WHERE h3_cell_contains(ST_Y(geometry), ST_X(geometry), CAST(? AS UBIGINT)) AND NOT h3_cell_contains(ST_Y(geometry), ST_X(geometry), CAST(? AS UBIGINT))`, plan.CellValue, uint64(parent)).Scan(&outsideParent)
 			assert.NilError(t, err)
-			if test.name == "ordinary" {
+			if test.name == "ordinary" || test.duplicateSources {
 				assert.Assert(t, outsideParent > 0, "fixture must exercise child points outside the logical parent")
 			}
 			assert.NilError(t, os.Remove(outputPath))

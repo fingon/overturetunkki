@@ -211,7 +211,7 @@ func BuildCachedCandidateQuery(plan QueryPlan, sourcePaths []string, maxRows int
 	args = append(args, plan.membershipArgs()...)
 	args = append(args, rowLimit)
 	return PreparedQuery{
-		SQL:  fmt.Sprintf("SELECT %s FROM read_parquet([%s]) WHERE %s QUALIFY row_number() OVER (PARTITION BY id ORDER BY id) = 1 LIMIT ?", candidateProjectionSQL(plan.Columns), strings.Join(placeholders, ", "), plan.membershipSQL()),
+		SQL:  fmt.Sprintf("SELECT DISTINCT ON (id) %s FROM read_parquet([%s]) WHERE %s ORDER BY id LIMIT ?", candidateProjectionSQL(plan.Columns), strings.Join(placeholders, ", "), plan.membershipSQL()),
 		Args: args,
 	}, nil
 }
