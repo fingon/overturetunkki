@@ -155,7 +155,7 @@ jobs:
     name: Publish service image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: publish-service-image
-    runs-on: ubuntu-24.04
+    runs-on: avrea-ubuntu-24.04-2-vcpu
     permissions:
       contents: read
       packages: write
